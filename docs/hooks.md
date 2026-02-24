@@ -4,198 +4,234 @@ Goose supports lifecycle hooks that allow external processes to integrate with t
 
 ## Configuration
 
-Add hooks to your `config.yaml` under the `hooks` key:
+Add hooks to `~/.config/goose/hooks.json`:
 
-```yaml
-hooks:
-  session_start:
-    - command: "/path/to/start-hook.sh"
-      timeout: 15
-  prompt_submit:
-    - command: "/path/to/inject.sh"
-      timeout: 5
-  pre_tool_use:
-    - command: "/path/to/scanner.sh"
-      timeout: 5
-      tool_name: "developer__shell"
-  post_tool_use:
-    - command: "/path/to/logger.sh"
-      timeout: 5
-  session_stop:
-    - command: "/path/to/cleanup.sh"
-      timeout: 10
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/path/to/start-hook.sh", "timeout": 15 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/path/to/inject.sh", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "developer__shell",
+        "hooks": [
+          { "type": "command", "command": "/path/to/guard.sh", "timeout": 5 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/path/to/cleanup.sh", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-### Fields
+### Config Locations
+
+| Location | Scope | Loaded |
+|----------|-------|--------|
+| `~/.config/goose/hooks.json` | Global (all sessions) | Always |
+| `.goose/settings.json` | Project (working dir) | When `allow_project_hooks: true` in global |
+| `.claude/settings.json` | Project (Claude Code compat) | When `allow_project_hooks: true` in global |
+
+Project hooks are merged with global hooks (both run).
+
+### Hook Action Types
+
+| Type | Description |
+|------|-------------|
+| `command` | Shell command. Receives JSON on stdin, returns JSON on stdout. |
+| `mcp_tool` | MCP tool invocation via ExtensionManager. |
+
+### Fields (Command Action)
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `command` | Yes | — | Shell command to execute (parsed via shlex for proper quoting) |
-| `timeout` | No | 10 | Timeout in seconds before the hook process is killed |
-| `tool_name` | No | — | Regex filter for tool name (pre_tool_use and post_tool_use only) |
+| `command` | Yes | — | Shell command to execute |
+| `timeout` | No | 600 | Timeout in seconds before the hook is killed |
 
-### Environment Variable (Legacy)
+### Matcher (PreToolUse, PostToolUse, PostToolUseFailure)
 
-For backward compatibility, `GOOSE_SESSION_START_HOOK` is still supported as an environment variable. If set and no `session_start` hooks are in config, the env var hook runs instead.
+The optional `matcher` field filters which tool calls trigger the hook:
+
+- `"developer__shell"` — direct tool name match
+- `"Bash"` — Claude Code compatibility alias for developer__shell
+- `"Bash(git *)"` — matches shell commands matching the glob pattern
 
 ## Events
 
-### session_start
+### SessionStart
 
-Fires once when a session begins. Use this for context injection (loading project context, rules, memory).
-
-**Input:**
-```json
-{
-  "event": "session_start",
-  "session_id": "abc-123"
-}
-```
-
-**Output:**
-```json
-{"context_injection": "Text to add to the system prompt"}
-```
-
-Plain text stdout is also accepted as a fallback (treated as context injection).
-
-### prompt_submit
-
-Fires on each user message before the agent processes it. Context injection overwrites the previous injection each turn (same prompt key).
+Fires once on the first user message in a session. Context returned is injected as an invisible user message.
 
 **Input:**
 ```json
 {
-  "event": "prompt_submit",
+  "hook_event_name": "SessionStart",
   "session_id": "abc-123",
-  "prompt_text": "list files in /tmp"
+  "cwd": "/home/user/project"
 }
 ```
 
 **Output:**
 ```json
-{"context_injection": "Per-turn context to inject"}
+{"additionalContext": "Text to inject into the conversation"}
 ```
 
-### pre_tool_use
+Plain text stdout is also accepted (treated as context injection).
 
-Fires before each tool call. Can block tool execution or require user approval. Integrates with Goose's tool inspection pipeline (runs after Security, Permission, and Repetition inspectors).
+### UserPromptSubmit
+
+Fires on each user message before the agent processes it. Can block the prompt or inject context.
 
 **Input:**
 ```json
 {
-  "event": "pre_tool_use",
-  "tool_name": "developer__shell",
-  "tool_arguments": {"command": "rm -rf /"}
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "abc-123",
+  "user_prompt": "list files in /tmp",
+  "cwd": "/home/user/project"
 }
 ```
 
 **Output:**
 ```json
-{"decision": "block", "reason": "Destructive command blocked by policy"}
+{"additionalContext": "Per-turn context to inject"}
 ```
 
-Decision values:
-- `"allow"` — permit the tool call (default if hook returns no decision)
-- `"block"` — deny the tool call entirely
-- `"require_approval"` — prompt the user for confirmation
+Exit code 2 blocks the prompt entirely.
 
-When multiple pre_tool_use hooks are configured, the most restrictive decision wins. Execution short-circuits on `"block"`.
+### PreToolUse
 
-**tool_name filter:** When `tool_name` is set in the hook config, the hook only fires for tool calls matching the regex pattern. Example: `tool_name: "developer__shell"` only fires for shell commands.
-
-### post_tool_use
-
-Fires after each tool call completes. Fire-and-forget: stdout is ignored, errors are logged but not propagated.
+Fires before each tool call. Can block tool execution.
 
 **Input:**
 ```json
 {
-  "event": "post_tool_use",
+  "hook_event_name": "PreToolUse",
   "session_id": "abc-123",
   "tool_name": "developer__shell",
-  "tool_arguments": {"command": "ls /tmp"},
-  "tool_result": "[\"file1.txt\", \"file2.txt\"]",
-  "tool_error": null
+  "tool_input": {"command": "rm -rf /"},
+  "cwd": "/home/user/project"
 }
 ```
 
-### session_stop
+**Blocking:** Exit code 2 blocks the tool call. Or return JSON:
+```json
+{"decision": "Block"}
+```
 
-Fires when a session ends. Fire-and-forget with best-effort execution.
+### PostToolUse
+
+Fires after each successful tool call. Can inject context.
 
 **Input:**
 ```json
 {
-  "event": "session_stop",
-  "session_id": "abc-123"
+  "hook_event_name": "PostToolUse",
+  "session_id": "abc-123",
+  "tool_name": "developer__shell",
+  "tool_input": {"command": "ls /tmp"},
+  "tool_output": ["file1.txt", "file2.txt"],
+  "cwd": "/home/user/project"
 }
 ```
+
+### PostToolUseFailure
+
+Fires after a failed tool call.
+
+**Input:**
+```json
+{
+  "hook_event_name": "PostToolUseFailure",
+  "session_id": "abc-123",
+  "tool_name": "developer__shell",
+  "tool_input": {"command": "invalid"},
+  "tool_error": "Command not found",
+  "cwd": "/home/user/project"
+}
+```
+
+### PreCompact / PostCompact
+
+Fire before and after conversation compaction (auto or manual).
+
+**Input (PreCompact):**
+```json
+{
+  "hook_event_name": "PreCompact",
+  "session_id": "abc-123",
+  "pre_compact_message_count": 42,
+  "manual_compact": false,
+  "cwd": "/home/user/project"
+}
+```
+
+**PostCompact** adds `post_compact_message_count`.
+
+Matcher values: `"manual"` or `"auto"` to filter by compaction type.
+
+### Stop
+
+Fires when the agent reply stream finishes.
+
+**Input:**
+```json
+{
+  "hook_event_name": "Stop",
+  "session_id": "abc-123",
+  "cwd": "/home/user/project"
+}
+```
+
+## Output Protocol
+
+| Exit Code | Meaning |
+|-----------|---------|
+| 0 | Allow. Parse stdout as JSON. Non-JSON stdout becomes `additionalContext`. |
+| 2 | Block (for blockable events: PreToolUse, UserPromptSubmit, Stop, etc.) |
+| Other | Fail-open. Hook error logged, execution continues. |
+
+**JSON output fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `additionalContext` | string | Context to inject into the conversation |
+| `decision` | `"Allow"` or `"Block"` | Override for blockable events |
 
 ## Multiple Hooks Per Event
 
-Multiple hooks can be configured for any event:
-
-- **Context injection events** (session_start, prompt_submit): All hooks run sequentially. Non-empty injections are concatenated with newlines.
-- **Decision events** (pre_tool_use): Hooks run sequentially. Most restrictive decision wins. Short-circuits on `"block"`.
-- **Fire-and-forget events** (post_tool_use, session_stop): All hooks run. Errors are logged, not propagated.
+Multiple hook actions run sequentially within each event config. Execution short-circuits on block. Context from all hooks is concatenated.
 
 ## Failure Handling
 
 All hook failures are **fail-open**: errors and timeouts are logged but never break the agent's normal operation.
 
-- Hook process fails to spawn → no effect
-- Hook times out → process is killed, no effect
-- Hook returns non-zero exit code → no effect
-- Hook returns invalid JSON → plain text treated as context injection (for context events); no effect (for decision events)
+## Augmentum OS Hooks
 
-## Example Hook Scripts
+See `contrib/hooks/` for production hook implementations:
 
-### Session context loader
+- `augmentum-session-start.sh` — node identity, fleet models, git context
+- `augmentum-context-inject.sh` — CQI v1 bridge (memory, vault, rules injection)
+- `augmentum-permit-check.sh` — session scope enforcement from `/run/augmentum/permits.json`
+- `augmentum-pre-tool-use.sh` — shell command audit logger
+- `augmentum-session-stop.sh` — session telemetry
 
-```bash
-#!/bin/bash
-# session-context.sh — inject project rules at session start
-INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
-
-# Load project-specific context
-if [ -f ".goose/context.md" ]; then
-    CONTEXT=$(cat .goose/context.md)
-    echo "{\"context_injection\": $(echo "$CONTEXT" | jq -Rs .)}"
-else
-    echo "{}"
-fi
-```
-
-### Security scanner
-
-```bash
-#!/bin/bash
-# security-scanner.sh — block dangerous shell commands
-INPUT=$(cat)
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""')
-ARGS=$(echo "$INPUT" | jq -r '.tool_arguments.command // ""')
-
-if [ "$TOOL" = "developer__shell" ]; then
-    # Block rm -rf, format, and other destructive commands
-    if echo "$ARGS" | grep -qE 'rm\s+-rf\s+/|mkfs\.|dd\s+if='; then
-        echo '{"decision": "block", "reason": "Destructive command blocked by security policy"}'
-        exit 0
-    fi
-fi
-
-echo '{"decision": "allow"}'
-```
-
-### Audit logger
-
-```bash
-#!/bin/bash
-# audit-logger.sh — log all tool calls for compliance
-INPUT=$(cat)
-TOOL=$(echo "$INPUT" | jq -r '.tool_name')
-TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-echo "$INPUT" | jq -c --arg ts "$TIMESTAMP" '. + {timestamp: $ts}' >> ~/.goose/audit.jsonl
-```
+Install: `cp contrib/config/hooks.json ~/.config/goose/hooks.json`

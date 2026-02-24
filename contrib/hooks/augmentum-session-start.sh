@@ -4,13 +4,11 @@
 # Reads context from Augmentum OS runtime paths and injects it into
 # the agent's system prompt at session start.
 #
-# Wire up in ~/.config/goose/hooks.yaml:
-#   hooks:
-#     session_start:
-#       - command: "/etc/augmentum/hooks/augmentum-session-start.sh"
-#         timeout: 10
+# Wire up in ~/.config/goose/hooks.json:
+#   "SessionStart": [{"hooks": [{"type": "command",
+#     "command": "~/.config/goose/hooks/augmentum-session-start.sh", "timeout": 10}]}]
 #
-# Output: {"context_injection": "..."} or plain text
+# Output: {"additionalContext": "..."} or plain text (upstream accepts both)
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
@@ -61,5 +59,5 @@ fi
 # Emit context injection (or nothing if empty)
 if [[ ${#parts[@]} -gt 0 ]]; then
     context=$(printf '%s\n' "${parts[@]}" | paste -sd $'\n')
-    jq -n --arg ctx "$context" '{"context_injection": $ctx}'
+    jq -n --arg ctx "$context" '{"additionalContext": $ctx}'
 fi

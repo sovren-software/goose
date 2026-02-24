@@ -8,27 +8,27 @@ Sovren remote: `sovren` → `https://github.com/sovren-software/goose.git`
 
 ## What This Fork Adds
 
-### Lifecycle Hooks (`feat/lifecycle-hooks`, merged to `main` on this fork)
+### Lifecycle Hooks (upstream `hooks/claude-code-compatible` branch, merged)
 
-5-event hook system wired into the agent lifecycle. Claude Code–compatible YAML config.
+16-event hook system wired into the agent lifecycle. Claude Code–compatible JSON config.
+Adopted from upstream PR #7411 with full agent.rs integration.
 
-```yaml
-# ~/.config/goose/hooks.yaml
-hooks:
-  session_start:
-    - command: "/path/to/init.sh"
-      timeout: 15
-  pre_tool_use:
-    - command: "/path/to/guard.sh"
-      tool_name: "developer__shell"
-  session_stop:
-    - command: "/path/to/cleanup.sh"
+```json
+// ~/.config/goose/hooks.json
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "/path/to/init.sh", "timeout": 15}]}],
+    "PreToolUse": [{"matcher": "developer__shell", "hooks": [{"type": "command", "command": "/path/to/guard.sh", "timeout": 5}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "/path/to/cleanup.sh", "timeout": 10}]}]
+  }
+}
 ```
 
 Key files:
-- `crates/goose/src/hooks/` — hook system (config, executor, inspector)
-- `crates/goose/tests/hooks_integration.rs` — 6 integration tests
+- `crates/goose/src/hooks/` — hook system (types, config, executor via ExtensionManager)
 - `docs/hooks.md` — user documentation
+- `contrib/hooks/` — Augmentum OS production hook scripts
+- `contrib/config/hooks.json` — reference config for Augmentum fleet
 
 ### Augmentum Fleet Provider
 
@@ -63,8 +63,8 @@ ssh cc-xx-22 "cd ~/cDesign/goose && cargo build --release -p goose-cli"
 
 **Branch strategy:**
 - `main` — our fork's main, tracks upstream + Sovren additions
-- `feat/lifecycle-hooks` — source branch for hooks (already in our main via commit 37337a3)
 - Augmentum-specific work goes directly to `main` or topic branches pushed to `sovren`
+- Upstream hooks merged from `origin/hooks/claude-code-compatible` (our initial impl replaced)
 
 **Upstream sync:**
 ```bash
@@ -78,8 +78,8 @@ git push sovren main
 ## Architecture Notes
 
 - Provider system: `crates/goose/src/providers/` — declarative JSON providers live in `declarative/`
-- Hook inspector integrates into `ToolInspectionManager` — see `tool_inspection.rs`
-- Session lifecycle wiring: `crates/goose-server/src/routes/agent.rs` (SessionStart/Stop)
+- Hooks: `crates/goose/src/hooks/` — types, config, executor (routes through ExtensionManager/MCP)
+- Hook wiring: `crates/goose/src/agents/agent.rs` — SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, PostCompact, Stop
 - Agent reply loop: `crates/goose/src/agents/agent.rs::reply()`
 
 ---
@@ -87,6 +87,8 @@ git push sovren main
 ## Relationship to Augmentum OS
 
 Goose is the AI agent runtime layer for Augmentum OS. Integration points:
-- Hooks read from `/run/augmentum/` context at session start (planned)
+- Hooks read from `/run/augmentum/` context at SessionStart
+- CQI v1 bridge (UserPromptSubmit) injects memory, vault, and rules from the cognitive layer
 - LiteLLM gateway (`localhost:4000`) provides fleet model routing
-- Session hooks enforce Augmentum OS policies via `pre_tool_use`
+- Permit enforcement (PreToolUse) blocks tool calls outside session scopes
+- Architecture boundary: `~/.dotfiles/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md`

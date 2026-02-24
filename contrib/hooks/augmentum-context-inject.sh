@@ -9,33 +9,27 @@
 # and the execution layer (Goose). See:
 #   ~/.dotfiles/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md
 #
-# Wire up in ~/.config/goose/hooks.yaml:
-#   hooks:
-#     session_start:
-#       - command: "~/.config/goose/hooks/augmentum-context-inject.sh"
-#         timeout: 15
-#     prompt_submit:
-#       - command: "~/.config/goose/hooks/augmentum-context-inject.sh"
-#         timeout: 10
+# Wire up in ~/.config/goose/hooks.json:
+#   "UserPromptSubmit": [{"hooks": [{"type": "command",
+#     "command": "~/.config/goose/hooks/augmentum-context-inject.sh", "timeout": 10}]}]
 #
-# CQI v1 Input (JSON on stdin):
+# Upstream Goose hook input (JSON on stdin):
 #   {
-#     "type": "context_query",      (optional — defaults to context_query)
+#     "hook_event_name": "UserPromptSubmit",
 #     "session_id": "string",
-#     "prompt": "string",           (optional for SessionStart)
-#     "tier": "terse|balanced|thorough",  (optional — defaults to balanced)
-#     "cwd": "/path/to/working/dir",
-#     "runtime": "goose"
+#     "user_prompt": "string",
+#     "cwd": "/path/to/working/dir"
 #   }
 #
-# Also accepts raw Goose hook input:
+# Also accepts CQI v1 format (for standalone testing):
 #   {
-#     "event": "session_start|prompt_submit",
+#     "prompt": "string",
 #     "session_id": "string",
-#     "prompt_text": "string"
+#     "tier": "terse|balanced|thorough",
+#     "cwd": "/path/to/working/dir"
 #   }
 #
-# Output: {"context_injection": "...", "sources": {...}, "tier": "..."}
+# Output: {"additionalContext": "...", "sources": {...}, "tier": "..."}
 #
 # Dependencies: python3, jq
 # Cognitive tools: ~/.dotfiles/.claude/hooks/{memory-inject,vault-inject,rule-apply}.py
@@ -57,10 +51,10 @@ if [[ ! -f "$MEMORY_INJECT" && ! -f "$VAULT_INJECT" && ! -f "$RULE_APPLY" ]]; th
     exit 0
 fi
 
-# --- Parse input (accept both CQI v1 format and raw Goose hook format) ---
+# --- Parse input (accept upstream Goose format and CQI v1 format) ---
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-# CQI v1 uses "prompt"; Goose PromptSubmit uses "prompt_text"
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // .prompt_text // empty' 2>/dev/null)
+# Upstream uses "user_prompt"; CQI v1 uses "prompt"
+PROMPT=$(echo "$INPUT" | jq -r '.user_prompt // .prompt // empty' 2>/dev/null)
 TIER=$(echo "$INPUT" | jq -r '.tier // empty' 2>/dev/null)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 
@@ -172,8 +166,8 @@ for i in "${!PARTS[@]}"; do
     COMBINED="${COMBINED}${PARTS[$i]}"
 done
 
-# --- Emit CQI v1 output ---
-# Uses context_injection (our fork) — when upstream merges, switch to additionalContext
+# --- Emit upstream-compatible output ---
+# additionalContext is the upstream field name for context injection
 jq -n \
     --arg ctx "$COMBINED" \
     --argjson mem "$MEMORY_COUNT" \
@@ -181,7 +175,7 @@ jq -n \
     --argjson rules "$RULES_COUNT" \
     --arg tier "$TIER" \
     '{
-        "context_injection": $ctx,
+        "additionalContext": $ctx,
         "sources": {
             "memory": $mem,
             "vault": $vault,

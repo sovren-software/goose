@@ -4,11 +4,9 @@
 # Reads active permits from /run/augmentum/permits.json and blocks tool calls
 # that fall outside the session's authorized scopes.
 #
-# Wire up in ~/.config/goose/hooks.yaml:
-#   hooks:
-#     pre_tool_use:
-#       - command: "~/.config/goose/hooks/augmentum-permit-check.sh"
-#         timeout: 5
+# Wire up in ~/.config/goose/hooks.json:
+#   "PreToolUse": [{"hooks": [{"type": "command",
+#     "command": "~/.config/goose/hooks/augmentum-permit-check.sh", "timeout": 5}]}]
 #
 # Permit file format (/run/augmentum/permits.json):
 #   {
@@ -20,7 +18,7 @@
 #     ]
 #   }
 #
-# Output: {"decision": "allow"} or {"decision": "block", "reason": "..."}
+# Output: exit 0 = allow, exit 2 = block (upstream hook protocol)
 #
 # Fail-open: if permits file is missing, unreadable, or malformed, allows all.
 
@@ -31,16 +29,13 @@ PERMITS_FILE="/run/augmentum/permits.json"
 
 # Fail-open: no permits file means no restrictions
 if [[ ! -f "$PERMITS_FILE" ]]; then
-    echo '{"decision": "allow"}'
     exit 0
 fi
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
-TOOL_ARGS=$(echo "$INPUT" | jq -r '.tool_arguments // empty' 2>/dev/null)
 
 # Fail-open: no tool name parsed
 if [[ -z "$TOOL_NAME" ]]; then
-    echo '{"decision": "allow"}'
     exit 0
 fi
 
@@ -48,20 +43,18 @@ fi
 SCOPES=$(jq -r '[.active[].scope] | join(",")' "$PERMITS_FILE" 2>/dev/null)
 if [[ -z "$SCOPES" ]]; then
     # No active permits = unrestricted
-    echo '{"decision": "allow"}'
     exit 0
 fi
 
 # --- Shell command enforcement ---
 if [[ "$TOOL_NAME" == "developer__shell" ]]; then
     if [[ ",$SCOPES," != *",shell,"* ]]; then
-        jq -n --arg reason "Shell commands not permitted in current session (active scopes: $SCOPES)" \
-            '{"decision": "block", "reason": $reason}'
-        exit 0
+        # Exit 2 = block in upstream hook protocol
+        exit 2
     fi
 
     # Check command against allowed patterns
-    COMMAND=$(echo "$TOOL_ARGS" | jq -r '.command // empty' 2>/dev/null)
+    COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
     if [[ -n "$COMMAND" ]]; then
         ALLOWED=$(jq -r '
             [.active[] | select(.scope == "shell") | .commands[]?] | join("\n")
@@ -77,10 +70,7 @@ if [[ "$TOOL_NAME" == "developer__shell" ]]; then
             done <<< "$ALLOWED"
 
             if [[ "$MATCHED" == "false" ]]; then
-                jq -n --arg reason "Command not in allowed patterns" \
-                    --arg cmd "$COMMAND" \
-                    '{"decision": "block", "reason": ("\($reason): \($cmd)")}'
-                exit 0
+                exit 2
             fi
         fi
     fi
@@ -89,20 +79,16 @@ fi
 # --- Write operation enforcement ---
 if [[ "$TOOL_NAME" == "write_file" || "$TOOL_NAME" == "edit_file" || "$TOOL_NAME" == "patch_file" ]]; then
     if [[ ",$SCOPES," != *",write,"* ]]; then
-        jq -n --arg reason "Write operations not permitted in current session (active scopes: $SCOPES)" \
-            '{"decision": "block", "reason": $reason}'
-        exit 0
+        exit 2
     fi
 fi
 
 # --- Network enforcement ---
 if [[ "$TOOL_NAME" == "fetch_url" || "$TOOL_NAME" == "web_search" ]]; then
     if [[ ",$SCOPES," != *",network,"* ]]; then
-        jq -n --arg reason "Network access not permitted in current session (active scopes: $SCOPES)" \
-            '{"decision": "block", "reason": $reason}'
-        exit 0
+        exit 2
     fi
 fi
 
-# Default: allow
-echo '{"decision": "allow"}'
+# Default: allow (exit 0)
+exit 0

@@ -1,0 +1,58 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/goose/hooks/augmentum-session-start.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/goose/hooks/augmentum-context-inject.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/goose/hooks/augmentum-permit-check.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "developer__shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/goose/hooks/augmentum-pre-tool-use.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/goose/hooks/augmentum-session-stop.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

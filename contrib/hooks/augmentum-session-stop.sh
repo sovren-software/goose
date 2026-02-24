@@ -4,11 +4,9 @@
 # Performs session cleanup and writes a summary entry to the session log.
 # Best-effort: failures are silent (this runs during shutdown).
 #
-# Wire up in ~/.config/goose/hooks.yaml:
-#   hooks:
-#     session_stop:
-#       - command: "~/.config/goose/hooks/augmentum-session-stop.sh"
-#         timeout: 10
+# Wire up in ~/.config/goose/hooks.json:
+#   "Stop": [{"hooks": [{"type": "command",
+#     "command": "~/.config/goose/hooks/augmentum-session-stop.sh", "timeout": 10}]}]
 #
 # Session log: ~/.local/share/goose/sessions.jsonl
 # Audit log: ~/.local/share/goose/tool-audit.jsonl (read for summary)
@@ -32,11 +30,11 @@ if [[ -f "$AUDIT_LOG" ]]; then
     TOOL_COUNT=$(grep -c "\"session_id\":\"$SESSION_ID\"" "$AUDIT_LOG" 2>/dev/null || echo 0)
 fi
 
-# Write session summary
-jq -n --arg ts "$TIMESTAMP" \
-      --arg sid "$SESSION_ID" \
-      --argjson tools "$TOOL_COUNT" \
-      '{"timestamp": $ts, "session_id": $sid, "event": "session_stop", "tool_calls": $tools}' \
+# Write session summary (compact for JSONL)
+jq -cn --arg ts "$TIMESTAMP" \
+       --arg sid "$SESSION_ID" \
+       --argjson tools "$TOOL_COUNT" \
+       '{"timestamp": $ts, "session_id": $sid, "event": "session_stop", "tool_calls": $tools}' \
     >> "$SESSION_LOG" 2>/dev/null
 
 # Clean up any session-scoped temp files
