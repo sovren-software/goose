@@ -710,6 +710,14 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
 
     configure_session_prompts(&session, config, &session_config, &session_id).await;
 
+    // E2 spike: run SessionStart hooks and inject any context into system prompt
+    if let Some(context) = goose::hooks::run_session_start_hooks(&session_id) {
+        session
+            .agent
+            .extend_system_prompt("session_start_hook".to_string(), context)
+            .await;
+    }
+
     if !session_config.quiet {
         output::display_session_info(
             session_config.resume,
