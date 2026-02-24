@@ -9,6 +9,11 @@ hooks:
       timeout: 10
 
   pre_tool_use:
+    # Permit enforcement — blocks tool calls outside active session scopes
+    # Reads /run/augmentum/permits.json; fail-open when file absent
+    - command: "~/.config/goose/hooks/augmentum-permit-check.sh"
+      timeout: 5
+
     # Audit shell commands — log to ~/.local/share/goose/tool-audit.jsonl
     - command: "~/.config/goose/hooks/augmentum-pre-tool-use.sh"
       timeout: 5
