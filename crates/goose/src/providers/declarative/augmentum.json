@@ -1,0 +1,26 @@
+{
+  "name": "augmentum",
+  "engine": "openai",
+  "display_name": "Augmentum Fleet",
+  "description": "Augmentum OS local LiteLLM gateway — routes across local Ollama models, OpenRouter, and Anthropic passthrough. Requires the LiteLLM gateway running at localhost:4000.",
+  "api_key_env": "LITELLM_API_KEY",
+  "base_url": "http://localhost:4000/v1/chat/completions",
+  "requires_auth": true,
+  "supports_streaming": true,
+  "timeout_seconds": 600,
+  "models": [
+    { "name": "qwen3-8b",                    "context_limit": 32768  },
+    { "name": "qwen2.5-coder-14b",           "context_limit": 32768  },
+    { "name": "deepseek-r1-free",            "context_limit": 163840 },
+    { "name": "qwen3-235b-thinking-free",    "context_limit": 92160  },
+    { "name": "qwen3-235b",                  "context_limit": 92160  },
+    { "name": "deepseek-v3.2",              "context_limit": 163840 },
+    { "name": "deepseek-v3.2-nitro",        "context_limit": 163840 },
+    { "name": "gpt-5-nano",                  "context_limit": 131072 },
+    { "name": "gemini-2.5-flash",            "context_limit": 1048576 },
+    { "name": "kimi-k2",                     "context_limit": 131072 },
+    { "name": "o4-mini",                     "context_limit": 200000 },
+    { "name": "api-sonnet",                  "context_limit": 200000 },
+    { "name": "api-opus",                    "context_limit": 200000 }
+  ]
+}

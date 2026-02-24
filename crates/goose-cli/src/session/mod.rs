@@ -503,6 +503,9 @@ impl CliSession {
                 .await?;
         }
 
+        // Run SessionStop hooks (best-effort, fire-and-forget)
+        goose::hooks::run_session_stop_hooks(&self.session_id).await;
+
         println!(
             "\n  {} {}",
             console::style("●").red(),
