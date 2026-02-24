@@ -5,7 +5,15 @@
 
 hooks:
   session_start:
+    # Node context: identity, compliance tier, gateway models, git branch
     - command: "~/.config/goose/hooks/augmentum-session-start.sh"
+      timeout: 10
+
+  prompt_submit:
+    # CQI v1 bridge — cognitive layer injection (memory, vault, rules)
+    # Calls ~/.dotfiles/.claude/hooks/{memory-inject,vault-inject,rule-apply}.py
+    # Gracefully degrades when embed-server is absent or tools are missing
+    - command: "~/.config/goose/hooks/augmentum-context-inject.sh"
       timeout: 10
 
   pre_tool_use:
