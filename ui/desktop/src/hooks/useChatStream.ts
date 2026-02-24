@@ -48,7 +48,6 @@ function resultsCacheSet(key: string, value: { messages: Message[]; session: Ses
     return;
   }
 
-  // Delete first so re-insertion moves it to the end (most recent)
   resultsCache.delete(key);
   resultsCache.set(key, value);
 
