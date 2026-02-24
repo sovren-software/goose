@@ -4,9 +4,14 @@ use goose::providers::api_client::{ApiClient, AuthMethod};
 use goose::providers::base::Provider;
 use goose::providers::openai::OpenAiProvider;
 use goose::session_context::SESSION_ID_HEADER;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue;
+use prost::Message as _;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tracing::Instrument;
+use tracing_subscriber::prelude::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -102,6 +107,80 @@ async fn make_request(provider: &dyn Provider, session_id: &str) {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_session_id_propagates_to_log_records() {
+    // 1. Start wiremock, capture protobuf bodies on /v1/logs
+    let mock_server = MockServer::start().await;
+    let log_bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Mount /v1/logs (and /v1/traces, /v1/metrics to avoid 404s)
+    for signal_path in ["/v1/logs", "/v1/traces", "/v1/metrics"] {
+        let bodies = if signal_path == "/v1/logs" {
+            log_bodies.clone()
+        } else {
+            Arc::new(Mutex::new(Vec::new()))
+        };
+        Mock::given(method("POST"))
+            .and(path(signal_path))
+            .respond_with(move |req: &Request| {
+                bodies.lock().unwrap().push(req.body.clone());
+                ResponseTemplate::new(200)
+            })
+            .expect(0..)
+            .mount(&mock_server)
+            .await;
+    }
+
+    // 2. Use clear_otel_env for env isolation, then set dynamic endpoint
+    let _otel_guard = goose::otel::testing::clear_otel_env(&[
+        ("OTEL_TRACES_EXPORTER", "none"),
+        ("OTEL_METRICS_EXPORTER", "none"),
+    ]);
+    let endpoint = format!("http://127.0.0.1:{}", mock_server.address().port());
+    std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint);
+
+    // 3. Call init_otlp_layers — the REAL production code path
+    let layers = goose::otel::otlp::init_otlp_layers(goose::config::Config::global());
+
+    // 4. Compose exactly like production: registry().with(layers) — Vec ordering!
+    let subscriber = tracing_subscriber::registry().with(layers);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // 5. Emit logs inside a session.id span using async instrumentation
+    let span = tracing::info_span!("test", session.id = "test-session-42");
+    async {
+        tokio::task::yield_now().await;
+        tracing::info!("hello from test");
+    }
+    .instrument(span)
+    .await;
+
+    // 6. Flush + shutdown (sends queued records to wiremock)
+    drop(_guard); // drop subscriber before shutdown to avoid capturing OTel internal logs
+    goose::otel::otlp::shutdown_otlp();
+
+    // 7. Decode protobuf, assert session.id on ALL log records
+    let bodies = log_bodies.lock().unwrap();
+    assert!(!bodies.is_empty());
+    for body in bodies.iter() {
+        let req = ExportLogsServiceRequest::decode(&body[..]).unwrap();
+        for rl in &req.resource_logs {
+            for sl in &rl.scope_logs {
+                for record in &sl.log_records {
+                    let has_session_id = record.attributes.iter().any(|kv| {
+                        kv.key == "session.id"
+                            && kv
+                                .value
+                                .as_ref()
+                                .is_some_and(|v| matches!(&v.value, Some(StringValue(s)) if s == "test-session-42"))
+                    });
+                    assert!(has_session_id);
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test]

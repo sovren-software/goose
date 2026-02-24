@@ -52,10 +52,11 @@ webbrowser = { workspace = true }
 lazy_static = "1.5.0"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-futures = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }
-opentelemetry-appender-tracing = { workspace = true }
 opentelemetry_sdk = { workspace = true }
+opentelemetry-appender-tracing = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-stdout = { workspace = true }
 keyring = { version = "3.6.2", features = [
@@ -128,6 +129,7 @@ pctx_code_mode = "^0.2.3"
 unbinder = "0.1.7"
 llama-cpp-2 = { version = "0.1.133", features = ["sampler"] }
 encoding_rs = "0.8.35"
+env-lock = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["wincred"] }
@@ -149,6 +151,9 @@ ctor = "0.2.9"
 test-case = { workspace = true }
 env-lock = { workspace = true }
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+opentelemetry-proto = { workspace = true }
+prost = { workspace = true }
 goose-test-support = { path = "../goose-test-support" }
 
 [[example]]

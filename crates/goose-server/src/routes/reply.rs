@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 fn track_tool_telemetry(content: &MessageContent, all_messages: &[Message]) {
     match content {
@@ -245,6 +246,7 @@ pub async fn reply(
     let task_cancel = cancel_token.clone();
     let task_tx = tx.clone();
 
+    let reply_span = tracing::info_span!("reply_handler", session.id = %session_id);
     drop(tokio::spawn(async move {
         let agent = match state.get_agent(session_id.clone()).await {
             Ok(agent) => agent,
@@ -452,7 +454,7 @@ pub async fn reply(
             &cancel_token,
         )
         .await;
-    }));
+    }.instrument(reply_span)));
     Ok(SseResponse::new(stream))
 }
 

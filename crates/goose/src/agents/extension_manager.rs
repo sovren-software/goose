@@ -221,12 +221,14 @@ struct ResolvedTool {
     client: McpClientBox,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn child_process_client(
     mut command: Command,
     timeout: &Option<u64>,
     provider: SharedProvider,
     working_dir: Option<&PathBuf>,
     docker_container: Option<String>,
+    session_id: Option<&str>,
     client_name: String,
     capabilities: GooseMcpClientCapabilities,
 ) -> ExtensionResult<McpClient> {
@@ -271,6 +273,7 @@ async fn child_process_client(
         Duration::from_secs(timeout.unwrap_or(crate::config::DEFAULT_EXTENSION_TIMEOUT)),
         provider,
         docker_container,
+        session_id,
         client_name,
         capabilities,
     )
@@ -393,12 +396,14 @@ pub(crate) fn substitute_env_vars(value: &str, env_map: &HashMap<String, String>
 const GOOSE_USER_AGENT: reqwest::header::HeaderValue =
     reqwest::header::HeaderValue::from_static(concat!("goose/", env!("CARGO_PKG_VERSION")));
 
+#[allow(clippy::too_many_arguments)]
 async fn create_streamable_http_client(
     uri: &str,
     timeout: Option<u64>,
     headers: &HashMap<String, String>,
     name: &str,
     provider: SharedProvider,
+    session_id: Option<&str>,
     client_name: String,
     capabilities: GooseMcpClientCapabilities,
 ) -> ExtensionResult<Box<dyn McpClientTrait>> {
@@ -432,10 +437,11 @@ async fn create_streamable_http_client(
     let timeout_duration =
         Duration::from_secs(timeout.unwrap_or(crate::config::DEFAULT_EXTENSION_TIMEOUT));
 
-    let client_res = McpClient::connect(
+    let client_res = McpClient::connect_with_session(
         transport,
         timeout_duration,
         provider.clone(),
+        session_id,
         client_name.clone(),
         capabilities.clone(),
     )
@@ -462,10 +468,11 @@ async fn create_streamable_http_client(
             },
         );
         Ok(Box::new(
-            McpClient::connect(
+            McpClient::connect_with_session(
                 transport,
                 timeout_duration,
                 provider,
+                session_id,
                 client_name,
                 capabilities,
             )
@@ -573,6 +580,7 @@ impl ExtensionManager {
                     &resolved_headers,
                     name,
                     self.provider.clone(),
+                    session_id,
                     self.client_name.clone(),
                     capability,
                 )
@@ -618,6 +626,7 @@ impl ExtensionManager {
                         self.provider.clone(),
                         Some(&effective_working_dir),
                         Some(container_id.to_string()),
+                        session_id,
                         self.client_name.clone(),
                         capabilities,
                     )
@@ -635,10 +644,11 @@ impl ExtensionManager {
                     };
 
                     Box::new(
-                        McpClient::connect(
+                        McpClient::connect_with_session(
                             (client_read, client_write),
                             timeout_duration,
                             self.provider.clone(),
+                            session_id,
                             self.client_name.clone(),
                             capabilities,
                         )
@@ -700,6 +710,7 @@ impl ExtensionManager {
                     self.provider.clone(),
                     Some(&effective_working_dir),
                     container.map(|c| c.id().to_string()),
+                    session_id,
                     self.client_name.clone(),
                     capabilities,
                 )
@@ -753,6 +764,7 @@ impl ExtensionManager {
                     self.provider.clone(),
                     Some(&effective_working_dir),
                     container.map(|c| c.id().to_string()),
+                    session_id,
                     self.client_name.clone(),
                     capabilities,
                 )

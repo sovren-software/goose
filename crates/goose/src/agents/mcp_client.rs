@@ -33,6 +33,7 @@ use tokio::sync::{
     Mutex,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 pub type BoxError = Box<dyn std::error::Error + Sync + Send>;
 
@@ -396,6 +397,31 @@ impl McpClient {
             timeout,
             provider,
             None,
+            None,
+            client_name,
+            capabilities,
+        )
+        .await
+    }
+
+    pub async fn connect_with_session<T, E, A>(
+        transport: T,
+        timeout: std::time::Duration,
+        provider: SharedProvider,
+        session_id: Option<&str>,
+        client_name: String,
+        capabilities: GooseMcpClientCapabilities,
+    ) -> Result<Self, ClientInitializeError>
+    where
+        T: IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + From<std::io::Error> + Send + Sync + 'static,
+    {
+        Self::connect_with_container(
+            transport,
+            timeout,
+            provider,
+            None,
+            session_id,
             client_name,
             capabilities,
         )
@@ -407,6 +433,7 @@ impl McpClient {
         timeout: std::time::Duration,
         provider: SharedProvider,
         docker_container: Option<String>,
+        session_id: Option<&str>,
         client_name: String,
         capabilities: GooseMcpClientCapabilities,
     ) -> Result<Self, ClientInitializeError>
@@ -423,8 +450,9 @@ impl McpClient {
             client_name.clone(),
             capabilities.clone(),
         );
+        let span = tracing::info_span!("mcp_session", session.id = session_id.unwrap_or(""));
         let client: rmcp::service::RunningService<rmcp::RoleClient, GooseClient> =
-            client.serve(transport).await?;
+            client.serve(transport).instrument(span).await?;
         let server_info = client.peer_info().cloned();
 
         Ok(Self {
