@@ -27,7 +27,74 @@ import { errorMessage } from '../utils/conversionUtils';
 import { showExtensionLoadResults } from '../utils/extensionErrorUtils';
 import { maybeHandlePlatformEvent } from '../utils/platform_events';
 
-const resultsCache = new Map<string, { messages: Message[]; session: Session }>();
+const MAX_CACHED_SESSIONS = 5;
+const MAX_ENTRY_SIZE_BYTES = 5 * 1024 * 1024; // 5MB per session
+const MAX_TOTAL_CACHE_BYTES = 20 * 1024 * 1024; // 20MB total
+
+interface CacheEntry {
+  messages: Message[];
+  session: Session;
+  estimatedBytes: number;
+}
+
+const resultsCache = new Map<string, CacheEntry>();
+
+function estimateSize(messages: Message[]): number {
+  let size = 0;
+  for (const msg of messages) {
+    for (const content of msg.content) {
+      if (content.type === 'text') {
+        size += content.text.length * 2;
+      } else if (content.type === 'toolResponse') {
+        size += JSON.stringify(content.toolResult).length * 2;
+      } else if (content.type === 'toolRequest') {
+        size += JSON.stringify(content.toolCall).length * 2;
+      } else {
+        size += 512;
+      }
+    }
+  }
+  return size;
+}
+
+function totalCacheBytes(): number {
+  let total = 0;
+  for (const entry of resultsCache.values()) {
+    total += entry.estimatedBytes;
+  }
+  return total;
+}
+
+function resultsCacheSet(key: string, value: { messages: Message[]; session: Session }) {
+  const entrySize = estimateSize(value.messages);
+
+  if (entrySize > MAX_ENTRY_SIZE_BYTES) {
+    resultsCache.delete(key);
+    return;
+  }
+
+  // Delete first so re-insertion moves it to the end (most recent)
+  resultsCache.delete(key);
+  resultsCache.set(key, { ...value, estimatedBytes: entrySize });
+
+  // Evict by count
+  while (resultsCache.size > MAX_CACHED_SESSIONS) {
+    const oldest = resultsCache.keys().next().value;
+    if (oldest !== undefined) resultsCache.delete(oldest);
+    else break;
+  }
+
+  // Evict by total size
+  while (totalCacheBytes() > MAX_TOTAL_CACHE_BYTES && resultsCache.size > 1) {
+    const oldest = resultsCache.keys().next().value;
+    if (oldest !== undefined && oldest !== key) resultsCache.delete(oldest);
+    else break;
+  }
+}
+
+export function evictSessionFromCache(sessionId: string) {
+  resultsCache.delete(sessionId);
+}
 
 interface UseChatStreamProps {
   sessionId: string;
@@ -346,7 +413,7 @@ export function useChatStream({
 
   useEffect(() => {
     if (state.session) {
-      resultsCache.set(sessionId, { session: state.session, messages: state.messages });
+      resultsCacheSet(sessionId, { session: state.session, messages: state.messages });
     }
   }, [sessionId, state.session, state.messages]);
 
