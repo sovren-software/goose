@@ -1,0 +1,19 @@
+# Augmentum OS — Goose hook configuration
+#
+# Install: copy to ~/.config/goose/hooks.yaml
+# Or symlink: ln -sf ~/cDesign/goose/contrib/config/hooks.yaml ~/.config/goose/hooks.yaml
+
+hooks:
+  session_start:
+    - command: "~/.config/goose/hooks/augmentum-session-start.sh"
+      timeout: 10
+
+  pre_tool_use:
+    # Audit shell commands — log to ~/.local/share/goose/tool-audit.jsonl
+    - command: "~/.config/goose/hooks/augmentum-pre-tool-use.sh"
+      timeout: 5
+      tool_name: "developer__shell"
+
+  session_stop:
+    - command: "~/.config/goose/hooks/augmentum-session-stop.sh"
+      timeout: 10

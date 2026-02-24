@@ -1,0 +1,7 @@
+# Augmentum OS — Goose provider configuration
+#
+# Install: copy to ~/.config/goose/config.yaml
+# Requires: LITELLM_API_KEY=litellm-local-key in environment or Goose keychain
+
+GOOSE_PROVIDER: augmentum
+GOOSE_MODEL: deepseek-v3.2
