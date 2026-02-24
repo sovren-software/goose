@@ -270,7 +270,22 @@ impl Agent {
         // Add repetition inspector (lower priority - basic repetition checking)
         tool_inspection_manager.add_inspector(Box::new(RepetitionInspector::new(None)));
 
+        // Add hook inspector (lowest priority - user-defined hooks run after all built-in inspectors)
+        let hook_inspector = crate::hooks::inspector::HookInspector::from_config();
+        if hook_inspector.has_hooks() {
+            tool_inspection_manager.add_inspector(Box::new(hook_inspector));
+        }
+
         tool_inspection_manager
+    }
+
+    /// Update the session ID propagated to PreToolUse hook payloads.
+    ///
+    /// Call this whenever a session ID becomes known (agent creation, reply start).
+    /// No-op if no hook inspector is registered.
+    pub fn set_hook_session_id(&self, session_id: &str) {
+        self.tool_inspection_manager
+            .set_hook_inspector_session_id(session_id);
     }
 
     /// Reset the retry attempts counter to 0
@@ -880,6 +895,9 @@ impl Agent {
     ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
         let session_manager = self.config.session_manager.clone();
 
+        // Ensure the hook inspector has the current session ID for PreToolUse payloads.
+        self.set_hook_session_id(&session_config.id);
+
         let message_text_for_trace = user_message.as_concat_text();
         tracing::Span::current().record("user_message", message_text_for_trace.as_str());
         tracing::Span::current().record("trace_input", message_text_for_trace.as_str());
@@ -989,6 +1007,15 @@ impl Agent {
                     .await?;
             }
         }
+
+        // Run PromptSubmit hooks and inject context (overwrites per turn via same key)
+        if let Some(context) =
+            crate::hooks::run_prompt_submit_hooks(&session_config.id, &message_text).await
+        {
+            self.extend_system_prompt("hook_prompt_submit".to_string(), context)
+                .await;
+        }
+
         let session = session_manager
             .get_session(&session_config.id, true)
             .await?;
@@ -1235,9 +1262,21 @@ impl Agent {
 
                                 let mut request_to_response_map = HashMap::new();
                                 let mut request_metadata: HashMap<String, Option<ProviderMetadata>> = HashMap::new();
+                                let mut request_to_tool_info: HashMap<String, (String, serde_json::Value)> = HashMap::new();
                                 for (idx, request) in frontend_requests.iter().chain(remaining_requests.iter()).enumerate() {
                                     request_to_response_map.insert(request.id.clone(), tool_response_messages[idx].clone());
                                     request_metadata.insert(request.id.clone(), request.metadata.clone());
+                                    if let Ok(tool_call) = &request.tool_call {
+                                        request_to_tool_info.insert(
+                                            request.id.clone(),
+                                            (
+                                                tool_call.name.to_string(),
+                                                tool_call.arguments.as_ref()
+                                                    .map(|a| serde_json::Value::Object(a.clone()))
+                                                    .unwrap_or(serde_json::Value::Null),
+                                            ),
+                                        );
+                                    }
                                 }
 
                                 for (idx, request) in frontend_requests.iter().enumerate() {
@@ -1380,6 +1419,26 @@ impl Agent {
                                                                 {
                                                                     all_install_successful = false;
                                                                 }
+                                                                // Fire PostToolUse hooks (fire-and-forget)
+                                                                if let Some((tool_name, tool_args)) = request_to_tool_info.get(&request_id) {
+                                                                    let sid = session_config.id.clone();
+                                                                    let tn = tool_name.clone();
+                                                                    let ta = tool_args.clone();
+                                                                    let (tr, te): (Option<String>, Option<String>) = match &output {
+                                                                        Ok(r) => (
+                                                                            serde_json::to_string(&r.content).ok(),
+                                                                            None,
+                                                                        ),
+                                                                        Err(e) => (None, Some(e.message.to_string())),
+                                                                    };
+                                                                    tokio::spawn(async move {
+                                                                        crate::hooks::run_post_tool_use_hooks(
+                                                                            &sid, &tn, &ta,
+                                                                            tr.as_deref(), te.as_deref(),
+                                                                        ).await;
+                                                                    });
+                                                                }
+
                                                                 if let Some(response_msg) = request_to_response_map.get(&request_id) {
                                                                     let metadata = request_metadata.get(&request_id).and_then(|m| m.as_ref());
                                                                     let mut response = response_msg.lock().await;

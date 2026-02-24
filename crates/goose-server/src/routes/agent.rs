@@ -319,6 +319,16 @@ async fn start_agent(
         .set_extension_loading_task(session_id_for_task, task)
         .await;
 
+    // Run SessionStart hooks and inject context into system prompt.
+    // Awaited before returning so the first message never races with hook injection.
+    if let Some(context) = goose::hooks::run_session_start_hooks(&session.id).await {
+        if let Ok(agent) = state.get_agent(session.id.clone()).await {
+            agent
+                .extend_system_prompt("session_start_hook".to_string(), context)
+                .await;
+        }
+    }
+
     Ok(Json(session))
 }
 
@@ -681,6 +691,14 @@ async fn stop_agent(
     Json(payload): Json<StopAgentRequest>,
 ) -> Result<StatusCode, ErrorResponse> {
     let session_id = payload.session_id;
+
+    // Run SessionStop hooks fire-and-forget — don't block the HTTP response.
+    // Hooks run with their configured timeouts; the server has already committed to stopping.
+    let session_id_for_hooks = session_id.clone();
+    tokio::spawn(async move {
+        goose::hooks::run_session_stop_hooks(&session_id_for_hooks).await;
+    });
+
     state
         .agent_manager
         .remove_session(&session_id)

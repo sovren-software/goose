@@ -1,20 +1,133 @@
-/// Lifecycle hook system for Goose — E2 spike (SessionStart only).
-///
-/// Reads hook commands from GOOSE_SESSION_START_HOOK environment variable.
-/// Each hook receives a JSON payload on stdin and can return JSON or plain text on stdout.
-///
-/// This spike validates: (a) hooks can be spawned from the session lifecycle,
-/// (b) stdout can be captured, (c) captured text can reach the system prompt
-/// via Agent::extend_system_prompt().
-use serde_json::{json, Value};
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+//! Lifecycle hook system for Goose.
+//!
+//! Provides 5 lifecycle events that external hook processes can subscribe to:
+//!
+//! | Event | Mechanism | Hook Output |
+//! |-------|-----------|-------------|
+//! | `session_start` | Context injection via `extend_system_prompt` | `context_injection` |
+//! | `prompt_submit` | Context injection (overwrites per turn) | `context_injection` |
+//! | `pre_tool_use` | `ToolInspector` pipeline integration | `decision` (allow/block/require_approval) |
+//! | `post_tool_use` | Fire-and-forget (`tokio::spawn`) | stdout ignored |
+//! | `session_stop` | Best-effort on exit | stdout ignored |
+//!
+//! Hooks are configured in `config.yaml` under the `hooks` key.
+//! All hooks receive JSON on stdin and return JSON on stdout.
+//! Hook failures are fail-open: errors are logged but never propagate.
 
-/// Run all configured SessionStart hooks and collect their context injections.
-/// Returns concatenated context injection text, or None if no hooks are configured.
-pub fn run_session_start_hooks(session_id: &str) -> Option<String> {
-    // Spike: read from env var (full config system comes in the real contribution)
+pub mod config;
+pub mod executor;
+pub mod inspector;
+
+use serde_json::json;
+
+use config::{load_hooks, HookEntry};
+use executor::{run_context_hooks, run_fire_and_forget_hooks};
+
+/// Run SessionStart hooks and return concatenated context injection text.
+///
+/// Called once when a session begins. The returned text is injected into
+/// the system prompt via `Agent::extend_system_prompt()`.
+pub async fn run_session_start_hooks(session_id: &str) -> Option<String> {
+    let config = load_hooks();
+    if config.session_start.is_empty() {
+        // Fall back to env var for backward compatibility with E2 spike
+        return run_session_start_hooks_env(session_id).await;
+    }
+
+    let payload = json!({
+        "event": "session_start",
+        "session_id": session_id,
+    });
+
+    run_context_hooks(&config.session_start, &payload).await
+}
+
+/// Run PromptSubmit hooks and return concatenated context injection text.
+///
+/// Called on each user message. The returned text overwrites the previous
+/// injection (same key `"hook_prompt_submit"` in `extend_system_prompt`).
+pub async fn run_prompt_submit_hooks(session_id: &str, prompt_text: &str) -> Option<String> {
+    let config = load_hooks();
+    if config.prompt_submit.is_empty() {
+        return None;
+    }
+
+    let payload = json!({
+        "event": "prompt_submit",
+        "session_id": session_id,
+        "prompt_text": prompt_text,
+    });
+
+    run_context_hooks(&config.prompt_submit, &payload).await
+}
+
+/// Run PostToolUse hooks as fire-and-forget.
+///
+/// Called after each tool call completes. Spawned in a `tokio::spawn` task
+/// so it does not block the agent loop.
+pub async fn run_post_tool_use_hooks(
+    session_id: &str,
+    tool_name: &str,
+    tool_arguments: &serde_json::Value,
+    tool_result: Option<&str>,
+    tool_error: Option<&str>,
+) {
+    let config = load_hooks();
+    let hooks: Vec<HookEntry> = config
+        .post_tool_use
+        .into_iter()
+        .filter(|h| tool_name_matches(h, tool_name))
+        .collect();
+
+    if hooks.is_empty() {
+        return;
+    }
+
+    let payload = json!({
+        "event": "post_tool_use",
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "tool_arguments": tool_arguments,
+        "tool_result": tool_result,
+        "tool_error": tool_error,
+    });
+
+    run_fire_and_forget_hooks(&hooks, &payload).await;
+}
+
+/// Run SessionStop hooks as fire-and-forget with a short timeout.
+///
+/// Called when a session ends. Best-effort: if hooks don't complete
+/// within their configured timeout, they are killed.
+pub async fn run_session_stop_hooks(session_id: &str) {
+    let config = load_hooks();
+    if config.session_stop.is_empty() {
+        return;
+    }
+
+    let payload = json!({
+        "event": "session_stop",
+        "session_id": session_id,
+    });
+
+    run_fire_and_forget_hooks(&config.session_stop, &payload).await;
+}
+
+/// Check if a hook's tool_name filter matches the given tool name.
+fn tool_name_matches(hook: &HookEntry, tool_name: &str) -> bool {
+    match &hook.tool_name {
+        None => true, // No filter = match all
+        Some(pattern) => regex::Regex::new(pattern)
+            .map(|re| re.is_match(tool_name))
+            .unwrap_or(true), // Invalid regex = fail-open
+    }
+}
+
+/// Backward-compatible env var fallback for SessionStart hooks.
+///
+/// Supports `GOOSE_SESSION_START_HOOK` environment variable from the E2 spike.
+/// This allows existing users to migrate gradually to the config-based system.
+async fn run_session_start_hooks_env(session_id: &str) -> Option<String> {
     let hook_cmd = std::env::var("GOOSE_SESSION_START_HOOK").ok()?;
     if hook_cmd.trim().is_empty() {
         return None;
@@ -25,76 +138,11 @@ pub fn run_session_start_hooks(session_id: &str) -> Option<String> {
         "session_id": session_id,
     });
 
-    run_hook(&hook_cmd, &payload, Duration::from_secs(10))
-}
+    let hook_entry = HookEntry {
+        command: hook_cmd,
+        timeout: 10,
+        tool_name: None,
+    };
 
-/// Execute a single hook command: send JSON payload on stdin, capture stdout.
-/// Returns the context_injection field if the output is valid JSON, or the raw
-/// stdout if it is plain text. Returns None on timeout or process error.
-fn run_hook(cmd: &str, payload: &Value, timeout: Duration) -> Option<String> {
-    // Parse command into program + args (simple shell split — full impl uses shlex)
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let (program, args) = parts.split_first()?;
-
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    // Write payload to stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.to_string().as_bytes());
-        // stdin dropped here → EOF sent to child
-    }
-
-    // Wait with timeout (std::process has no built-in timeout; use a thread)
-    let output = wait_with_timeout(child, timeout)?;
-
-    if !output.status.success() && output.stdout.is_empty() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        return None;
-    }
-
-    // If JSON, extract context_injection; otherwise use raw stdout
-    if let Ok(parsed) = serde_json::from_str::<Value>(&stdout) {
-        let injection = parsed.get("context_injection")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| stdout.clone());
-        Some(injection)
-    } else {
-        Some(stdout)
-    }
-}
-
-/// Block until the child exits or the timeout elapses.
-/// On timeout, kills the child and returns None.
-fn wait_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Option<std::process::Output> {
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child.wait_with_output().ok();
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => return None,
-        }
-    }
+    run_context_hooks(&[hook_entry], &payload).await
 }

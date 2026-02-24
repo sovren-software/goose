@@ -95,6 +95,9 @@ impl AgentManager {
             GoosePlatform::GooseDesktop,
         );
         let agent = Arc::new(Agent::with_config(config));
+        // Propagate session_id to hook inspector immediately so PreToolUse payloads
+        // include it even before the first call to reply().
+        agent.set_hook_session_id(&session_id);
         if let Some(provider) = &*self.default_provider.read().await {
             agent
                 .update_provider(Arc::clone(provider), &session_id)

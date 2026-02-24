@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::config::GooseMode;
 use crate::conversation::message::{Message, ToolRequest};
+use crate::hooks::inspector::HookInspector;
 use crate::permission::permission_inspector::PermissionInspector;
 use crate::permission::permission_judge::PermissionCheckResult;
 
@@ -138,6 +139,20 @@ impl ToolInspectionManager {
             }
         }
         tracing::warn!("Permission inspector not found for permission manager update");
+    }
+
+    /// Update the session ID in the hook inspector so PreToolUse payloads include it.
+    ///
+    /// No-op if no hook inspector is registered.
+    pub fn set_hook_inspector_session_id(&self, session_id: &str) {
+        for inspector in &self.inspectors {
+            if inspector.name() == "hook" {
+                if let Some(hook_inspector) = inspector.as_any().downcast_ref::<HookInspector>() {
+                    hook_inspector.set_session_id(session_id);
+                    return;
+                }
+            }
+        }
     }
 
     /// Process inspection results using the permission inspector
