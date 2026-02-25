@@ -90,5 +90,25 @@ if [[ "$TOOL_NAME" == "fetch_url" || "$TOOL_NAME" == "web_search" ]]; then
     fi
 fi
 
+# --- MCP extension tool enforcement ---
+# augmentum-system__* write tools are gated by aegis-permit-check (Rust binary).
+# The MCP server itself also checks permits; this hook is defense-in-depth at
+# the Goose layer before the call reaches the MCP server.
+# Command names must match what the MCP server passes to aegis-permit-check.
+if command -v aegis-permit-check &>/dev/null; then
+    case "$TOOL_NAME" in
+        augmentum-system__service_restart)
+            aegis-permit-check "infrastructure" "restart" 2>/dev/null || exit 2 ;;
+        augmentum-system__service_stop)
+            aegis-permit-check "infrastructure" "stop" 2>/dev/null || exit 2 ;;
+        augmentum-system__network_reset_interface)
+            aegis-permit-check "infrastructure" "network_reset" 2>/dev/null || exit 2 ;;
+        augmentum-system__network_flush_routes)
+            aegis-permit-check "infrastructure" "network_flush" 2>/dev/null || exit 2 ;;
+        augmentum-system__ip_rule_delete)
+            aegis-permit-check "infrastructure" "ip_rule_delete" 2>/dev/null || exit 2 ;;
+    esac
+fi
+
 # Default: allow (exit 0)
 exit 0
