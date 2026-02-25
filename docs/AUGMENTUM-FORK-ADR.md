@@ -183,13 +183,81 @@ Output:
 
 ---
 
+## Decision 4: Augmentum System MCP — Self-Healing Runtime (2026-02-25)
+
+**Decision:** Add a 14-tool MCP server (`augmentum-system-mcp.py`) that exposes system diagnostics
+and remediation operations to Goose, gated by the existing permit system. Add a DRAVE-structured
+network recovery recipe and `aegis fix` CLI entry point.
+
+**Motivating failure:** cc-xx-22 Surfshark VPN malfunction injected WireGuard routing rules that
+routed all traffic through a dead tunnel. Resolution required manual `snap stop surfshark`,
+`ip rule del`, and `systemctl restart NetworkManager` — violating the Augmentum OS UX standard
+(zero terminal knowledge required from user).
+
+**Rationale:**
+
+- The permit system (`aegis-permit-check`, HMAC-signed, Rust binary) is the correct privilege gate —
+  reuse it rather than inventing a new authorization layer.
+- 60+ existing `aegis` CLI subcommands already wrap the necessary diagnostics. The MCP server is
+  thin glue, not new logic.
+- Goose's recipe system provides a structured place to encode DRAVE diagnosis/remediation workflows
+  without hardcoding logic into the agent.
+
+**Key decisions:**
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| MCP server location | `augmentum-os` repo | Deployed by NixOS module; goose repo is Rust, MCP server is Python |
+| Permit enforcement | Dual-layer (hook + MCP server) | Defense-in-depth; hook catches misconfigured MCP, MCP catches hook bypass |
+| Stdio transport | `run_in_executor(None, readline)` | Portable across Python 3.8+; `connect_read_pipe` API varies by version |
+| Network instructions | Baked Nix string, passed via `--system` | Avoids runtime YAML parsing; `--instructions` takes FILE not inline text |
+| Permit commands | Per-tool (restart/stop/network_reset/network_flush/ip_rule_delete) | Enables fine-grained permit grants; wildcard permits remain possible with `*` command |
+
+**Expected benefits:**
+
+- Surfshark scenario (and class of VPN routing corruption failures) fully remediable via natural language
+- `aegis fix "my internet is broken"` → Goose diagnoses, remediates, verifies without terminal
+- Offline-capable: falls back to local llama-swap when LiteLLM gateway unreachable
+- No new privilege model — existing permit infrastructure extended, not replaced
+- Full HMAC audit trail for every write operation
+
+**Trade-offs:**
+
+- MCP server is Python, not Rust — adds `python3` runtime dependency to nodes that run Goose.
+  Mitigated: python3 is already present on all NixOS nodes.
+- 14 tools is a larger surface than strictly needed for the Surfshark scenario. Justified by the
+  breadth of network failure classes (5 root causes) that share the same MCP infrastructure.
+
+**Drawbacks / Known Limitations:**
+
+- `goose run --recipe` and `--text` are mutually exclusive — `aegis fix` cannot both load a recipe
+  AND pass user-provided text as the prompt. Current workaround: `--system` + `--text` with baked
+  DRAVE instructions. The recipe YAML is deployed for documentation/reference; it cannot be used
+  as a recipe and passed text simultaneously via the CLI.
+- Goose extension config is written to `~/.config/goose/config.yaml` by the NixOS activation script.
+  If the user has a pre-existing `config.yaml` from manual setup, the activation script appends the
+  extension config in JSON format — which is valid YAML but not idiomatic. A second activation run
+  will not duplicate it (grep guard), but the file format becomes mixed.
+- The MCP server is not yet tested against Goose's live extension loader. Extension config field
+  names (`type: stdio`, `cmd`, `args`, `timeout`) match the Goose declarative provider pattern but
+  are unverified against the actual extension loading code path.
+- `aegis-permit-check` must be in PATH when the augmentum-permit-check.sh hook runs. On nodes
+  where `aegis.ai.brainTools.enable = false`, the binary will not be present; the hook degrades
+  gracefully (the `command -v aegis-permit-check` guard is false, write ops are not checked by
+  the hook). The MCP server's in-process check also fails gracefully: denied rather than allowed.
+
+---
+
 ## Remaining Work
 
 ### Deployment (Immediate)
 
 - [ ] **Release build verification** — `cargo build --release -p goose-cli` on cc-xx-22 (31GB). `cargo check` passes; release build not yet confirmed.
-- [ ] **hooks.json deployed** — copy `contrib/config/hooks.json` to `~/.config/goose/hooks.json` and install hook scripts on CCX.
-- [ ] **NixOS derivation** — package `goose-cli` in `augmentum-os` flake for fleet deployment. Use `pkgs-unstable.rustPlatform` (requires recent rustc).
+- [x] **hooks.json deployed** — handled by `goose.nix` activation script (writes to `~/.config/goose/hooks.json` if absent).
+- [x] **NixOS derivation** — `goose.nix` deploys `goose-cli` package; `goose-mcp.nix` deploys MCP server and extension config.
+- [ ] **MCP extension loader verification** — start a Goose session on a deployed node and confirm `augmentum-system__*` tools appear in `tools/list`. The extension config format is based on documentation; needs live confirmation.
+- [ ] **Surfshark scenario smoke test** — simulate VPN routing corruption on a test node, run `aegis fix "fix my internet"`, verify remediation completes.
+- [ ] **Persistent embed-server for Goose** — `memory-inject.py` degrades to FTS5-only when embed-server socket is absent. Wire `embed-server.py` as a systemd user service so Goose sessions get full vector search. (Claude Code sessions already handle this per-session.)
 
 ### v2 Feature Roadmap
 
@@ -217,6 +285,7 @@ Dynamic model selection per turn: fast model for simple responses, reasoning mod
 | Skill system | `~/.claude/skills/` auto-activation | Manual AGENTS.md / recipes | Low (CQI partially covers) |
 | Persistent embed-server | Per-session subprocess | Not wired for Goose | Low (FTS5 fallback active) |
 | PostCompact context reinject | Via PostCompact hook | Available via upstream hooks | Resolved (hook wired) |
+| Self-healing system ops | N/A (terminal-focused) | `augmentum-system` MCP (14 tools) | **Resolved** (2026-02-25) |
 
 ---
 
