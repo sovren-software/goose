@@ -34,6 +34,7 @@ use crate::conversation::message::{
     ToolRequest,
 };
 use crate::conversation::{debug_conversation_fix, fix_conversation, Conversation};
+use crate::hooks::{HookEvent, HookRuntime};
 use crate::mcp_utils::ToolResult;
 use crate::permission::permission_inspector::PermissionInspector;
 use crate::permission::permission_judge::PermissionCheckResult;
@@ -392,12 +393,40 @@ impl Agent {
         request_to_response_map: &HashMap<String, Arc<Mutex<Message>>>,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         session: &Session,
+        hooks: &HookRuntime,
     ) -> Result<Vec<(String, ToolStream)>> {
         let mut tool_futures: Vec<(String, ToolStream)> = Vec::new();
 
         // Handle pre-approved and read-only tools
         for request in &permission_check_result.approved {
             if let Ok(tool_call) = request.tool_call.clone() {
+                // Fire PreToolUse hook
+                let outcome = hooks.emit(
+                    HookEvent::PreToolUse {
+                        session_id: session.id.clone(),
+                        tool_name: tool_call.name.to_string(),
+                        tool_input: serde_json::to_value(&tool_call.arguments).unwrap_or_default(),
+                        cwd: session.working_dir.clone(),
+                    },
+                    &session.working_dir,
+                    cancel_token.clone().unwrap_or_default(),
+                ).await;
+                if outcome.blocked {
+                    let error_result = Err(ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        "Tool execution blocked by hook".to_string(),
+                        None,
+                    ));
+                    tool_futures.push((
+                        request.id.clone(),
+                        tool_stream(
+                            Box::new(stream::empty()),
+                            futures::future::ready(error_result),
+                        ),
+                    ));
+                    continue;
+                }
+
                 let (req_id, tool_result) = self
                     .dispatch_tool_call(
                         tool_call,
@@ -444,6 +473,20 @@ impl Agent {
                 );
             }
         }
+    }
+
+    async fn inject_hook_context(
+        session_id: &str,
+        context: String,
+        session_manager: &SessionManager,
+        conversation: &mut Conversation,
+    ) -> Result<()> {
+        let msg = Message::user()
+            .with_text(context)
+            .with_visibility(false, true);
+        session_manager.add_message(session_id, &msg).await?;
+        conversation.push(msg);
+        Ok(())
     }
 
     /// Get a reference count clone to the provider
@@ -995,6 +1038,8 @@ impl Agent {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Session {} has no conversation", session_config.id))?;
 
+        let hooks = HookRuntime::load(&session.working_dir);
+
         let needs_auto_compact = check_if_compaction_needed(
             self.provider().await?.as_ref(),
             &conversation,
@@ -1034,6 +1079,18 @@ impl Agent {
                     )
                 );
 
+                // Fire PreCompact hook
+                hooks.emit(
+                    HookEvent::PreCompact {
+                        session_id: session_config.id.clone(),
+                        message_count: conversation_to_compact.messages().len(),
+                        manual: false,
+                        cwd: session.working_dir.clone(),
+                    },
+                    &session.working_dir,
+                    cancel_token.clone().unwrap_or_default(),
+                ).await;
+
                 match compact_messages(
                     self.provider().await?.as_ref(),
                     &session_config.id,
@@ -1043,8 +1100,25 @@ impl Agent {
                 .await
                 {
                     Ok((compacted_conversation, summarization_usage)) => {
+                        let pre_len = conversation_to_compact.messages().len();
                         session_manager.replace_conversation(&session_config.id, &compacted_conversation).await?;
                         self.update_session_metrics(&session_config.id, session_config.schedule_id.clone(), &summarization_usage, true).await?;
+
+                        // Fire PostCompact hook
+                        let post_outcome = hooks.emit(
+                            HookEvent::PostCompact {
+                                session_id: session_config.id.clone(),
+                                before_count: pre_len,
+                                after_count: compacted_conversation.messages().len(),
+                                manual: false,
+                                cwd: session.working_dir.clone(),
+                            },
+                            &session.working_dir,
+                            cancel_token.clone().unwrap_or_default(),
+                        ).await;
+                        // Context from PostCompact will be injected into the conversation
+                        // in reply_internal via the returned compacted_conversation
+                        let _ = post_outcome;
 
                         yield AgentEvent::HistoryReplaced(compacted_conversation.clone());
 
@@ -1068,7 +1142,7 @@ impl Agent {
                 }
             };
 
-            let mut reply_stream = self.reply_internal(final_conversation, session_config, session, cancel_token).await?;
+            let mut reply_stream = self.reply_internal(final_conversation, session_config, session, cancel_token, hooks).await?;
             while let Some(event) = reply_stream.next().await {
                 yield event?;
             }
@@ -1081,6 +1155,7 @@ impl Agent {
         session_config: SessionConfig,
         session: Session,
         cancel_token: Option<CancellationToken>,
+        hooks: HookRuntime,
     ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
         let context = self
             .prepare_reply_context(&session.id, conversation, session.working_dir.as_path())
@@ -1113,6 +1188,52 @@ impl Agent {
         }
 
         let working_dir = session.working_dir.clone();
+
+        // Fire SessionStart hook on first reply (1 user message, 0 assistant)
+        if conversation.messages().len() == 1
+            && conversation.messages()[0].role == rmcp::model::Role::User
+        {
+            let outcome = hooks.emit(
+                HookEvent::SessionStart {
+                    session_id: session_id.clone(),
+                    cwd: working_dir.clone(),
+                },
+                &working_dir,
+                cancel_token.clone().unwrap_or_default(),
+            ).await;
+            if let Some(ctx) = outcome.context {
+                Self::inject_hook_context(&session_id, ctx, &session_manager, &mut conversation)
+                    .await.ok();
+            }
+        }
+
+        // Fire UserPromptSubmit hook
+        if let Some(last_user_msg) = conversation
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.role == rmcp::model::Role::User)
+        {
+            let user_prompt = last_user_msg.as_concat_text();
+            let outcome = hooks.emit(
+                HookEvent::UserPromptSubmit {
+                    session_id: session_id.clone(),
+                    user_prompt,
+                    cwd: working_dir.clone(),
+                },
+                &working_dir,
+                cancel_token.clone().unwrap_or_default(),
+            ).await;
+            if outcome.blocked {
+                return Ok(Box::pin(async_stream::try_stream! {
+                    yield AgentEvent::Message(Message::assistant().with_text("Prompt blocked by hook."));
+                }));
+            }
+            if let Some(ctx) = outcome.context {
+                Self::inject_hook_context(&session_id, ctx, &session_manager, &mut conversation)
+                    .await.ok();
+            }
+        }
 
         Ok(Box::pin(async_stream::try_stream! {
             let reply_stream_span = tracing::info_span!(target: "goose::agents::agent", "reply_stream");
@@ -1309,6 +1430,7 @@ impl Agent {
                                         &request_to_response_map,
                                         cancel_token.clone(),
                                         &session,
+                                        &hooks,
                                     ).await?;
 
                                     let tool_futures_arc = Arc::new(Mutex::new(tool_futures));
@@ -1320,6 +1442,7 @@ impl Agent {
                                         cancel_token.clone(),
                                         &session,
                                         &inspection_results,
+                                        &hooks,
                                     );
 
                                     while let Some(msg) = tool_approval_stream.try_next().await? {
@@ -1371,6 +1494,47 @@ impl Agent {
                                                                                 let server_notification = rmcp::model::ServerNotification::CustomNotification(custom_notification);
                                                                                 yield AgentEvent::McpNotification((request_id.clone(), server_notification));
                                                                             }
+                                                                        }
+                                                                    }
+                                                                }
+
+                                                                // Fire PostToolUse or PostToolUseFailure hooks
+                                                                if let Some(original_request) = request_id_to_request.get(&request_id) {
+                                                                    if let Ok(ref tool_call) = original_request.tool_call {
+                                                                        let tool_input = serde_json::to_value(&tool_call.arguments).unwrap_or_default();
+                                                                        let hook_outcome = match &output {
+                                                                            Ok(call_result) => {
+                                                                                let tool_output = serde_json::to_value(&call_result.content)
+                                                                                    .map(|v| v.to_string())
+                                                                                    .unwrap_or_default();
+                                                                                hooks.emit(
+                                                                                    HookEvent::PostToolUse {
+                                                                                        session_id: session_config.id.clone(),
+                                                                                        tool_name: tool_call.name.to_string(),
+                                                                                        tool_input,
+                                                                                        tool_output,
+                                                                                        cwd: working_dir.clone(),
+                                                                                    },
+                                                                                    &working_dir,
+                                                                                    cancel_token.clone().unwrap_or_default(),
+                                                                                ).await
+                                                                            }
+                                                                            Err(error_data) => {
+                                                                                hooks.emit(
+                                                                                    HookEvent::PostToolUseFailure {
+                                                                                        session_id: session_config.id.clone(),
+                                                                                        tool_name: tool_call.name.to_string(),
+                                                                                        tool_input,
+                                                                                        tool_error: error_data.message.to_string(),
+                                                                                        cwd: working_dir.clone(),
+                                                                                    },
+                                                                                    &working_dir,
+                                                                                    cancel_token.clone().unwrap_or_default(),
+                                                                                ).await
+                                                                            }
+                                                                        };
+                                                                        if let Some(ctx) = hook_outcome.context {
+                                                                            Self::inject_hook_context(&session_config.id, ctx, &session_manager, &mut conversation).await.ok();
                                                                         }
                                                                     }
                                                                 }
@@ -1504,6 +1668,18 @@ impl Agent {
                                 )
                             );
 
+                            // Fire PreCompact hook (recovery)
+                            hooks.emit(
+                                HookEvent::PreCompact {
+                                    session_id: session_config.id.clone(),
+                                    message_count: conversation.messages().len(),
+                                    manual: false,
+                                    cwd: working_dir.clone(),
+                                },
+                                &working_dir,
+                                cancel_token.clone().unwrap_or_default(),
+                            ).await;
+
                             match compact_messages(
                                 self.provider().await?.as_ref(),
                                 &session_config.id,
@@ -1513,8 +1689,25 @@ impl Agent {
                             .await
                             {
                                 Ok((compacted_conversation, usage)) => {
+                                    let pre_len = conversation.messages().len();
                                     session_manager.replace_conversation(&session_config.id, &compacted_conversation).await?;
                                     self.update_session_metrics(&session_config.id, session_config.schedule_id.clone(), &usage, true).await?;
+
+                                    // Fire PostCompact hook (recovery)
+                                    let pc_outcome = hooks.emit(
+                                        HookEvent::PostCompact {
+                                            session_id: session_config.id.clone(),
+                                            before_count: pre_len,
+                                            after_count: compacted_conversation.messages().len(),
+                                            manual: false,
+                                            cwd: working_dir.clone(),
+                                        },
+                                        &working_dir,
+                                        cancel_token.clone().unwrap_or_default(),
+                                    ).await;
+                                    if let Some(ctx) = pc_outcome.context {
+                                        Self::inject_hook_context(&session_config.id, ctx, &session_manager, &mut conversation).await.ok();
+                                    }
 
                                     conversation = compacted_conversation;
                                     did_recovery_compact_this_iteration = true;
@@ -1656,6 +1849,16 @@ impl Agent {
 
                 tokio::task::yield_now().await;
             }
+
+            // Fire Stop hook
+            hooks.emit(
+                HookEvent::Stop {
+                    session_id: session_id.clone(),
+                    cwd: working_dir.clone(),
+                },
+                &working_dir,
+                cancel_token.clone().unwrap_or_default(),
+            ).await;
 
             if !last_assistant_text.is_empty() {
                 tracing::info!(target: "goose::agents::agent", trace_output = last_assistant_text.as_str());

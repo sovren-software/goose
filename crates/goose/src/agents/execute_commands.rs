@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 
 use crate::context_mgmt::compact_messages;
 use crate::conversation::message::{Message, SystemNotificationType};
+use crate::hooks::{HookEvent, HookRuntime};
 use crate::recipe::build_recipe::build_recipe_from_template_with_positional_params;
+use tokio_util::sync::CancellationToken;
 
 use super::Agent;
 
@@ -86,6 +88,20 @@ impl Agent {
             .conversation
             .ok_or_else(|| anyhow!("Session has no conversation"))?;
 
+        // Fire PreCompact hook
+        let hooks = HookRuntime::load(&session.working_dir);
+        hooks.emit(
+            HookEvent::PreCompact {
+                session_id: session_id.to_string(),
+                message_count: conversation.messages().len(),
+                manual: true,
+                cwd: session.working_dir.clone(),
+            },
+            &session.working_dir,
+            CancellationToken::new(),
+        ).await;
+
+        let pre_compact_len = conversation.messages().len();
         let (compacted_conversation, usage) = compact_messages(
             self.provider().await?.as_ref(),
             session_id,
@@ -99,6 +115,19 @@ impl Agent {
 
         self.update_session_metrics(session_id, session.schedule_id, &usage, true)
             .await?;
+
+        // Fire PostCompact hook
+        hooks.emit(
+            HookEvent::PostCompact {
+                session_id: session_id.to_string(),
+                before_count: pre_compact_len,
+                after_count: compacted_conversation.messages().len(),
+                manual: true,
+                cwd: session.working_dir.clone(),
+            },
+            &session.working_dir,
+            CancellationToken::new(),
+        ).await;
 
         Ok(Some(Message::assistant().with_system_notification(
             SystemNotificationType::InlineMessage,
