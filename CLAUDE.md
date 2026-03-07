@@ -1,8 +1,8 @@
 # Augmentum Agent (Goose Fork)
 
 Sovren Software's fork of [block/goose](https://github.com/block/goose).
-Upstream remote: `origin` → `https://github.com/block/goose.git`
-Sovren remote: `sovren` → `https://github.com/sovren-software/goose.git`
+Upstream remote: `upstream` → `git@github.com:block/goose.git`
+Sovren remote: `origin` → `git@github.com:sovren-software/goose.git`
 
 ---
 
@@ -107,13 +107,13 @@ CARGO_BUILD_JOBS=2 cargo build -p goose-server
 **Branch strategy:**
 - `main` — our fork's main, tracks upstream + Sovren additions
 - Augmentum-specific work goes directly to `main` or topic branches pushed to `sovren`
-- Upstream hooks merged from `origin/hooks/claude-code-compatible` (our initial impl replaced)
+- Hook system re-architected in Decision 5 (direct subprocess, zero rmcp coupling)
 
 **Upstream sync:**
 ```bash
-git fetch origin
-git merge origin/main  # merge upstream changes onto our main
-git push sovren main
+git fetch upstream
+git merge upstream/main  # merge upstream changes onto our main
+git push origin main
 ```
 
 ---

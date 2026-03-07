@@ -158,28 +158,35 @@ cp contrib/config/hooks.json ~/.config/goose/hooks.json
 
 ---
 
-## Hook Protocol Reference (Upstream)
+## Hook Protocol Reference
 
-Input field names for `developer__shell`-routed hooks:
+Input fields (stdin JSON). All field names are snake_case.
 
 | Field | Description | Events |
 |-------|-------------|--------|
 | `hook_event_name` | PascalCase event type | All |
 | `session_id` | Session UUID | All |
-| `cwd` | Working directory | All |
+| `cwd` | Working directory path (string) | All |
 | `user_prompt` | User's message text | UserPromptSubmit |
-| `tool_name` | Tool being called | PreToolUse, PostToolUse |
-| `tool_input` | Tool arguments (JSON object) | PreToolUse, PostToolUse |
-| `tool_output` | Tool result | PostToolUse |
+| `tool_name` | Tool being called | PreToolUse, PostToolUse, PostToolUseFailure |
+| `tool_input` | Tool arguments (JSON object) | PreToolUse, PostToolUse, PostToolUseFailure |
+| `tool_output` | Tool result (string) | PostToolUse |
 | `tool_error` | Error message | PostToolUseFailure |
+| `message_count` | Messages before compact | PreCompact |
+| `before_count` | Messages before compact | PostCompact |
+| `after_count` | Messages after compact | PostCompact |
+| `manual` | Whether compact was user-triggered | PreCompact, PostCompact |
 
-Output:
+Output (stdout JSON, all lowercase):
 
 | Field | Description |
 |-------|-------------|
-| `additionalContext` | Text injected as invisible user message |
-| `decision` | `"Block"` or `"Allow"` (blockable events) |
-| exit code 2 | Block (alternative to JSON decision) |
+| `additional_context` | Text injected as invisible user message |
+| `decision` | `"block"` or `"allow"` (blockable events only) |
+| `reason` | Optional string, logged but not injected |
+| exit code 2 | Block (canonical mechanism; preferred over JSON decision) |
+
+See `docs/hooks.md` for complete event reference and output protocol.
 
 ---
 
@@ -293,18 +300,14 @@ Dynamic model selection per turn: fast model for simple responses, reasoning mod
 
 ```bash
 # Sync upstream main changes
-git fetch origin
-git merge origin/main --no-edit
-git push sovren main
-
-# Monitor upstream hooks PR
-# https://github.com/block/goose/pull/7411 (hooks/claude-code-compatible)
-# Watch for merges to origin/main — already adopted, no further action needed
+git fetch upstream
+git merge upstream/main --no-edit
+git push origin main   # origin = sovren-software/goose
 ```
 
 Upstream branches to watch:
-- `origin/main` — merge periodically (monthly or when significant features land)
-- `origin/hooks/claude-code-compatible` — already merged (Phase 4). Monitor for follow-up commits.
+- `upstream/main` — merge periodically (monthly or when significant features land)
+- `upstream/hooks/claude-code-compatible` — our hook system was re-architected independently (Decision 5); this branch is no longer relevant
 
 ---
 
