@@ -47,7 +47,7 @@ if [[ -z "$SCOPES" ]]; then
 fi
 
 # --- Shell command enforcement ---
-if [[ "$TOOL_NAME" == "developer__shell" ]]; then
+if [[ "$TOOL_NAME" == "shell" || "$TOOL_NAME" == "developer__shell" ]]; then
     if [[ ",$SCOPES," != *",shell,"* ]]; then
         # Exit 2 = block in upstream hook protocol
         exit 2

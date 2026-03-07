@@ -126,7 +126,7 @@ pub(crate) struct HookResult {
     #[allow(dead_code)]
     pub reason: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, alias = "additionalContext")]
     pub additional_context: Option<String>,
 }
 
@@ -206,6 +206,15 @@ mod tests {
         assert!(obj.contains_key("tool_output"), "expected snake_case tool_output");
         assert!(obj.contains_key("cwd"), "expected lowercase cwd");
         assert!(!obj.contains_key("SessionId"), "PascalCase field names would break contrib hooks");
+    }
+
+    #[test]
+    fn hook_result_accepts_camel_case_context() {
+        // Contrib hooks emit "additionalContext" (camelCase, Claude Code convention).
+        // The serde alias must accept both forms.
+        let json = r#"{"additionalContext": "from camelCase"}"#;
+        let result: HookResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.additional_context.as_deref(), Some("from camelCase"));
     }
 
     #[test]

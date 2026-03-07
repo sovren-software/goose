@@ -27,7 +27,7 @@ TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Count tool calls from this session's audit log
 TOOL_COUNT=0
 if [[ -f "$AUDIT_LOG" ]]; then
-    TOOL_COUNT=$(grep -c "\"session_id\":\"$SESSION_ID\"" "$AUDIT_LOG" 2>/dev/null || echo 0)
+    TOOL_COUNT=$(grep -c "\"session_id\":\"$SESSION_ID\"" "$AUDIT_LOG" 2>/dev/null) || TOOL_COUNT=0
 fi
 
 # Write session summary (compact for JSONL)

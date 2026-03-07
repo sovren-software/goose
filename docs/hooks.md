@@ -71,8 +71,9 @@ Only `command` actions are supported. Hooks execute as direct subprocesses — n
 
 The optional `matcher` field filters which tool calls trigger the hook:
 
-- `"developer__shell"` — direct tool name match
-- `"Bash"` — Claude Code compatibility alias for developer__shell
+- `"shell"` — platform extension tool name (preferred)
+- `"developer__shell"` — namespaced form (also accepted)
+- `"Bash"` — Claude Code compatibility alias for shell / developer__shell
 - `"Bash(git *)"` — matches shell commands matching the glob pattern
 
 ## Events
@@ -221,8 +222,8 @@ Fires when the agent reply stream finishes.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `additional_context` | string | Context to inject into the conversation |
-| `decision` | `"allow"` or `"block"` | Override for blockable events (lowercase) |
+| `additional_context` | string | Context to inject into the conversation (`additionalContext` also accepted) |
+| `decision` | `"allow"` or `"block"` | Override for blockable events (lowercase). Honored at both exit 0 and exit 2. |
 | `reason` | string | Optional reason string (logged, not injected) |
 
 ## Multiple Hooks Per Event

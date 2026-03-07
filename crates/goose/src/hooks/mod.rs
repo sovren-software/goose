@@ -84,6 +84,17 @@ impl HookRuntime {
                                         if let Some(hook_result) =
                                             Self::parse_stdout(&output.stdout, event.is_blockable())
                                         {
+                                            // Honor JSON decision:"block" at exit 0 (Claude Code compat)
+                                            if hook_result.decision == Some(HookDecision::Block)
+                                                && event.is_blockable()
+                                            {
+                                                outcome.blocked = true;
+                                                tracing::info!(
+                                                    "Hook blocked event {} (JSON decision)",
+                                                    event.kind()
+                                                );
+                                                return outcome;
+                                            }
                                             if let Some(ctx) = hook_result.additional_context {
                                                 contexts.push(ctx);
                                             }
@@ -186,7 +197,7 @@ impl HookRuntime {
 
     /// Match a tool invocation against a Claude Code-style matcher pattern.
     /// Supports:
-    ///   "Bash" or "Bash(...)" — maps to developer__shell
+    ///   "Bash" or "Bash(...)" — maps to shell / developer__shell
     ///   "tool_name" — direct tool name match
     fn matches_tool(pattern: &str, event: &HookEvent) -> bool {
         let tool_name = match event.tool_name() {
@@ -194,9 +205,11 @@ impl HookRuntime {
             None => return false,
         };
 
+        let is_shell = tool_name == "shell" || tool_name == "developer__shell";
+
         // Claude Code "Bash" syntax
         if pattern == "Bash" {
-            return tool_name == "developer__shell";
+            return is_shell;
         }
 
         // Claude Code "Bash(pattern)" syntax
@@ -204,7 +217,7 @@ impl HookRuntime {
             .strip_prefix("Bash(")
             .and_then(|s| s.strip_suffix(')'))
         {
-            if tool_name != "developer__shell" {
+            if !is_shell {
                 return false;
             }
             let command_str = event
@@ -245,6 +258,22 @@ mod tests {
     }
 
     #[test]
+    fn matches_tool_shell_platform_name() {
+        // Platform extensions register as "shell" (not "developer__shell").
+        // Both forms must match Bash shorthand and Bash(glob) patterns.
+        let event = HookEvent::PreToolUse {
+            session_id: "s1".into(),
+            tool_name: "shell".into(),
+            tool_input: json!({"command": "cargo build"}),
+            cwd: "/tmp".into(),
+        };
+        assert!(HookRuntime::matches_tool("Bash", &event));
+        assert!(HookRuntime::matches_tool("Bash(cargo*)", &event));
+        assert!(!HookRuntime::matches_tool("Bash(rm*)", &event));
+        assert!(HookRuntime::matches_tool("shell", &event));
+    }
+
+    #[test]
     fn matches_tool_direct_name() {
         let event = HookEvent::PreToolUse {
             session_id: "s1".into(),
@@ -280,14 +309,66 @@ mod tests {
 
     #[test]
     fn parse_stdout_block_decision_at_exit_0() {
-        // A hook that exits 0 but returns decision:block — unusual but should
-        // be handled gracefully (we don't set blocked since exit code 2 is
-        // the canonical block mechanism)
+        // A hook that exits 0 but returns decision:block — Claude Code compat.
+        // emit() checks this field and sets outcome.blocked for blockable events.
         let result = HookRuntime::parse_stdout(
             r#"{"decision": "block", "reason": "no"}"#,
             true,
         )
         .unwrap();
         assert_eq!(result.decision, Some(HookDecision::Block));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn emit_honors_json_block_at_exit_0() {
+        // Integration test: a hook that exits 0 with {"decision":"block"}
+        // must set outcome.blocked = true. This was a dead code path before
+        // the fix — parse_stdout returned the decision but emit() ignored it.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write a hook script that exits 0 with block decision
+        let hook_script = dir.path().join("block-hook.sh");
+        let mut f = std::fs::File::create(&hook_script).unwrap();
+        writeln!(f, "#!/bin/bash").unwrap();
+        writeln!(f, r#"echo '{{"decision":"block","reason":"test"}}'"#).unwrap();
+        writeln!(f, "exit 0").unwrap();
+        drop(f);
+        std::fs::set_permissions(
+            &hook_script,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        // Write a hooks.json that wires this script to UserPromptSubmit
+        let config_path = dir.path().join("hooks.json");
+        let config = serde_json::json!({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": hook_script.to_str().unwrap(),
+                        "timeout": 5
+                    }]
+                }]
+            }
+        });
+        std::fs::write(&config_path, config.to_string()).unwrap();
+
+        let runtime = HookRuntime {
+            config: serde_json::from_str(&config.to_string()).unwrap(),
+        };
+
+        let event = HookEvent::UserPromptSubmit {
+            session_id: "test".into(),
+            user_prompt: "hello".into(),
+            cwd: dir.path().to_path_buf(),
+        };
+
+        let outcome = runtime
+            .emit(event, dir.path(), CancellationToken::new())
+            .await;
+        assert!(outcome.blocked, "exit-0 JSON block decision must set outcome.blocked");
     }
 }
