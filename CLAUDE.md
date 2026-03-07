@@ -8,10 +8,10 @@ Sovren remote: `sovren` → `https://github.com/sovren-software/goose.git`
 
 ## What This Fork Adds
 
-### Lifecycle Hooks (upstream `hooks/claude-code-compatible` branch, merged)
+### Lifecycle Hooks (re-architected: direct subprocess, zero rmcp coupling)
 
-16-event hook system wired into the agent lifecycle. Claude Code–compatible JSON config.
-Adopted from upstream PR #7411 with full agent.rs integration.
+8-event hook system wired into the agent lifecycle via `HookRuntime`. Claude Code–compatible
+JSON config. Hooks execute as direct subprocesses (not via MCP), decoupled from agent internals.
 
 ```json
 // ~/.config/goose/hooks.json
@@ -121,7 +121,7 @@ git push sovren main
 ## Architecture Notes
 
 - Provider system: `crates/goose/src/providers/` — declarative JSON providers live in `declarative/`
-- Hooks: `crates/goose/src/hooks/` — types, config, executor (routes through ExtensionManager/MCP)
+- Hooks: `crates/goose/src/hooks/` — HookRuntime with direct subprocess execution (zero rmcp imports)
 - Hook wiring: `crates/goose/src/agents/agent.rs` — SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, PostCompact, Stop
 - Agent reply loop: `crates/goose/src/agents/agent.rs::reply()`
 

@@ -308,6 +308,51 @@ Upstream branches to watch:
 
 ---
 
+## Decision 5: HookRuntime Re-Architecture — Direct Subprocess Execution (2026-03-07)
+
+**Decision:** Replace the MCP-routed hook executor (Decision 2) with a `HookRuntime` that
+executes hooks as direct subprocesses. Decouple hooks from `rmcp` types and `ExtensionManager`.
+
+**Motivating problem:** Upstream merged rmcp 0.16 -> 1.1.0, restructured agent.rs (SmartApprove,
+PermissionInspector, extension consolidation), and moved to builder-pattern APIs. Our hooks code
+constructed `CallToolRequestParams` struct literals and routed through `ExtensionManager.dispatch_tool_call()`,
+creating merge conflicts at every upstream sync. 106 commits behind with 3 breaking changes.
+
+**Architecture:**
+
+| Aspect | Old (Decision 2) | New (Decision 5) |
+|--------|------------------|------------------|
+| Execution | Via `developer__shell` MCP tool | Direct `tokio::process::Command` subprocess |
+| rmcp coupling | `CallToolRequestParams` struct literals | Zero rmcp imports in hooks module |
+| Agent coupling | `ExtensionManager` reference required | Only `CancellationToken` |
+| Action types | Command + McpTool | Command only |
+| Agent surface | ~380 lines across 3 files | ~43 lines across 3 files |
+| Interface | `Hooks::run(invocation, ext_mgr, ...)` | `HookRuntime::emit(event, working_dir, cancel)` |
+
+**Key design decisions:**
+1. **Drop McpTool action type** — all hooks execute as direct subprocesses. MCP routing was the
+   primary source of coupling. Can be re-added inside HookRuntime without changing the emit() API.
+2. **8 event types** — SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure,
+   PreCompact, PostCompact, Stop. Additional events are enum variants, not interface changes.
+3. **HookEvent is the stable contract** — the only type that crosses the hooks/agent boundary.
+   Serializable to the same JSON format contrib hooks expect.
+4. **Config format unchanged** — same hooks.json, same matcher syntax. Zero contrib hook changes.
+
+**Expected benefits:**
+- Upstream merges require zero hook-related conflict resolution
+- 89% reduction in agent wiring code (380 -> 43 lines)
+- No dependency on `developer__shell` extension being loaded
+- Subprocess isolation (own process group) prevents terminal SIGINT from killing hooks
+- Deadlock-safe stdin/stdout handling (drain tasks spawned before stdin write)
+
+**Trade-offs:**
+- Lost McpTool action type. No current hooks use it; can be re-added if needed.
+- Direct subprocess means hooks run in a different environment than MCP tools (no MCP
+  transport, no extension context). For shell scripts this is identical; for hypothetical
+  MCP-native hooks it would differ.
+
+---
+
 ## Relationship to Other ADRs
 
 - `~/.dotfiles/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md` — boundary definition, CQI v1 spec
