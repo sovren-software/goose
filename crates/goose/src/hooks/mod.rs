@@ -277,4 +277,17 @@ mod tests {
         let result = HookRuntime::parse_stdout("", false).unwrap();
         assert!(result.additional_context.is_none());
     }
+
+    #[test]
+    fn parse_stdout_block_decision_at_exit_0() {
+        // A hook that exits 0 but returns decision:block — unusual but should
+        // be handled gracefully (we don't set blocked since exit code 2 is
+        // the canonical block mechanism)
+        let result = HookRuntime::parse_stdout(
+            r#"{"decision": "block", "reason": "no"}"#,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.decision, Some(HookDecision::Block));
+    }
 }

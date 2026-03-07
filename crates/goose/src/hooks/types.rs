@@ -188,6 +188,27 @@ mod tests {
     }
 
     #[test]
+    fn hook_event_fields_are_snake_case() {
+        // Contrib hooks parse stdin JSON with jq using snake_case field names.
+        // This test guards against serde rename_all accidentally changing them.
+        let event = HookEvent::PostToolUse {
+            session_id: "s1".into(),
+            tool_name: "developer__shell".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            tool_output: "files".into(),
+            cwd: "/tmp".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(obj.contains_key("session_id"), "expected snake_case session_id");
+        assert!(obj.contains_key("tool_name"), "expected snake_case tool_name");
+        assert!(obj.contains_key("tool_input"), "expected snake_case tool_input");
+        assert!(obj.contains_key("tool_output"), "expected snake_case tool_output");
+        assert!(obj.contains_key("cwd"), "expected lowercase cwd");
+        assert!(!obj.contains_key("SessionId"), "PascalCase field names would break contrib hooks");
+    }
+
+    #[test]
     fn hook_result_deserializes_from_json() {
         let json = r#"{"decision": "block", "reason": "not allowed", "additional_context": "ctx"}"#;
         let result: HookResult = serde_json::from_str(json).unwrap();
