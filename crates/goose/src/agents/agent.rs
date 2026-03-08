@@ -33,7 +33,6 @@ use crate::conversation::message::{
     ActionRequiredData, Message, MessageContent, ProviderMetadata, SystemNotificationType,
     ToolRequest,
 };
-use crate::conversation::tool_result_serde::call_tool_result;
 use crate::conversation::{debug_conversation_fix, fix_conversation, Conversation};
 use crate::hooks::Hooks;
 use crate::mcp_utils::ToolResult;
@@ -247,7 +246,10 @@ impl Agent {
             tool_result_tx: tool_tx,
             tool_result_rx: Arc::new(Mutex::new(tool_rx)),
             retry_manager: RetryManager::new(),
-            tool_inspection_manager: Self::create_tool_inspection_manager(permission_manager),
+            tool_inspection_manager: Self::create_tool_inspection_manager(
+                permission_manager,
+                provider.clone(),
+            ),
             container: Mutex::new(None),
         }
     }
@@ -255,6 +257,7 @@ impl Agent {
     /// Create a tool inspection manager with default inspectors
     fn create_tool_inspection_manager(
         permission_manager: Arc<PermissionManager>,
+        provider: SharedProvider,
     ) -> ToolInspectionManager {
         let mut tool_inspection_manager = ToolInspectionManager::new();
 
@@ -263,9 +266,8 @@ impl Agent {
 
         // Add permission inspector (medium-high priority)
         tool_inspection_manager.add_inspector(Box::new(PermissionInspector::new(
-            std::collections::HashSet::new(), // readonly tools - will be populated from extension manager
-            std::collections::HashSet::new(), // regular tools - will be populated from extension manager
             permission_manager,
+            provider,
         )));
 
         // Add repetition inspector (lower priority - basic repetition checking)
@@ -351,6 +353,10 @@ impl Agent {
         let (tools, toolshim_tools, system_prompt) = self
             .prepare_tools_and_prompt(session_id, working_dir)
             .await?;
+
+        if self.config.goose_mode == GooseMode::SmartApprove {
+            self.tool_inspection_manager.apply_tool_annotations(&tools);
+        }
 
         Ok(ReplyContext {
             conversation,
@@ -517,12 +523,9 @@ impl Agent {
                 let mut response = response_msg.lock().await;
                 *response = response.clone().with_tool_response_with_metadata(
                     request.id.clone(),
-                    Ok(CallToolResult {
-                        content: vec![rmcp::model::Content::text(DECLINED_RESPONSE)],
-                        structured_content: None,
-                        is_error: Some(true),
-                        meta: None,
-                    }),
+                    Ok(CallToolResult::error(vec![rmcp::model::Content::text(
+                        DECLINED_RESPONSE,
+                    )])),
                     request.metadata.as_ref(),
                 );
             }
@@ -600,12 +603,7 @@ impl Agent {
             let result = self
                 .handle_schedule_management(arguments, request_id.clone())
                 .await;
-            let wrapped_result = result.map(|content| CallToolResult {
-                content,
-                structured_content: None,
-                is_error: Some(false),
-                meta: None,
-            });
+            let wrapped_result = result.map(CallToolResult::success);
             return (request_id, Ok(ToolCallResult::from(wrapped_result)));
         }
 
@@ -1303,7 +1301,11 @@ impl Agent {
             let reply_stream_span = tracing::info_span!(target: "goose::agents::agent", "reply_stream");
             let _stream_guard = reply_stream_span.enter();
             let mut turns_taken = 0u32;
-            let max_turns = session_config.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
+            let max_turns = session_config.max_turns.unwrap_or_else(|| {
+                Config::global()
+                    .get_param::<u32>("GOOSE_MAX_TURNS")
+                    .unwrap_or(DEFAULT_MAX_TURNS)
+            });
             let mut compaction_attempts = 0;
             let mut last_assistant_text = String::new();
 
@@ -1444,12 +1446,7 @@ impl Agent {
                                             let mut response = response_msg.lock().await;
                                             *response = response.clone().with_tool_response_with_metadata(
                                                 request.id.clone(),
-                                                Ok(CallToolResult {
-                                                    content: vec![Content::text(CHAT_MODE_TOOL_SKIPPED_RESPONSE)],
-                                                    structured_content: None,
-                                                    is_error: Some(false),
-                                                    meta: None,
-                                                }),
+                                                Ok(CallToolResult::success(vec![Content::text(CHAT_MODE_TOOL_SKIPPED_RESPONSE)])),
                                                 request.metadata.as_ref(),
                                             );
                                         }
@@ -1458,6 +1455,7 @@ impl Agent {
                                     // Run all tool inspectors
                                     let inspection_results = self.tool_inspection_manager
                                         .inspect_tools(
+                                            &session_config.id,
                                             &remaining_requests,
                                             conversation.messages(),
                                             goose_mode,
@@ -1545,64 +1543,6 @@ impl Agent {
                                                     Some((request_id, item)) => {
                                                         match item {
                                                             ToolStreamItem::Result(output) => {
-                                                                let output = call_tool_result::validate(output);
-
-                                                                // Fire PostToolUse or PostToolUseFailure hooks
-                                                                if let Some(original_request) = request_id_to_request.get(&request_id) {
-                                                                    if let Ok(ref tool_call) = original_request.tool_call {
-                                                                        let tool_input = serde_json::to_value(&tool_call.arguments)
-                                                                            .unwrap_or(serde_json::Value::Null);
-                                                                        match &output {
-                                                                            Ok(call_result) => {
-                                                                                let tool_output = serde_json::to_value(&call_result.content)
-                                                                                    .unwrap_or(serde_json::Value::Null);
-                                                                                let invocation = crate::hooks::HookInvocation::post_tool_use(
-                                                                                    session_config.id.clone(),
-                                                                                    tool_call.name.to_string(),
-                                                                                    tool_input,
-                                                                                    tool_output,
-                                                                                    working_dir.to_string_lossy().to_string(),
-                                                                                );
-                                                                                if let Ok(outcome) = hooks
-                                                                                    .run(
-                                                                                        invocation,
-                                                                                        &self.extension_manager,
-                                                                                        &working_dir,
-                                                                                        cancel_token.clone().unwrap_or_default(),
-                                                                                    )
-                                                                                    .await
-                                                                                {
-                                                                                    if let Some(ctx) = outcome.context {
-                                                                                        Self::inject_hook_context(&session_config.id, ctx, &session_manager, &mut conversation).await.ok();
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                            Err(error_data) => {
-                                                                                let invocation = crate::hooks::HookInvocation::post_tool_use_failure(
-                                                                                    session_config.id.clone(),
-                                                                                    tool_call.name.to_string(),
-                                                                                    tool_input,
-                                                                                    error_data.message.to_string(),
-                                                                                    working_dir.to_string_lossy().to_string(),
-                                                                                );
-                                                                                if let Ok(outcome) = hooks
-                                                                                    .run(
-                                                                                        invocation,
-                                                                                        &self.extension_manager,
-                                                                                        &working_dir,
-                                                                                        cancel_token.clone().unwrap_or_default(),
-                                                                                    )
-                                                                                    .await
-                                                                                {
-                                                                                    if let Some(ctx) = outcome.context {
-                                                                                        Self::inject_hook_context(&session_config.id, ctx, &session_manager, &mut conversation).await.ok();
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-
                                                                 if let Ok(ref call_result) = output {
                                                                     if let Some(ref meta) = call_result.meta {
                                                                         if let Some(notification_data) = meta.0.get("platform_notification") {
@@ -1825,6 +1765,16 @@ impl Agent {
                                     SystemNotificationType::CreditsExhausted,
                                     user_msg,
                                     notification_data,
+                                )
+                            );
+                            break;
+                        }
+                        Err(ref provider_err @ ProviderError::NetworkError(_)) => {
+                            crate::posthog::emit_error(provider_err.telemetry_type(), &provider_err.to_string());
+                            error!("Error: {}", provider_err);
+                            yield AgentEvent::Message(
+                                Message::assistant().with_text(
+                                    format!("{provider_err}\n\nPlease resend your message to try again.")
                                 )
                             );
                             break;
