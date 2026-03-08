@@ -106,6 +106,9 @@ impl StatusBar {
 
         // Reset scroll region to full terminal
         write!(stdout, "\x1b[r")?;
+
+        // Move cursor to bottom of terminal so input prompt appears there (CC-style)
+        execute!(stdout, cursor::MoveTo(0, rows.saturating_sub(1)))?;
         stdout.flush()?;
         Ok(())
     }
