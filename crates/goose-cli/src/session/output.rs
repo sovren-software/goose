@@ -114,34 +114,49 @@ pub fn get_show_full_tool_output() -> bool {
     SHOW_FULL_TOOL_OUTPUT.with(|s| *s.borrow())
 }
 
-// Simple wrapper around spinner to manage its state
+// CC-style thinking indicator using indicatif
 #[derive(Default)]
 pub struct ThinkingIndicator {
-    spinner: Option<cliclack::ProgressBar>,
+    spinner: Option<ProgressBar>,
 }
 
 impl ThinkingIndicator {
     pub fn show(&mut self) {
-        let spinner = cliclack::spinner();
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .tick_strings(&[
+                    "\u{27e1}",  // ⟡
+                    "\u{25c7}",  // ◇
+                    "\u{25c6}",  // ◆
+                    "\u{25c7}",  // ◇
+                    "\u{27e1}",  // ⟡
+                    "\u{25cb}",  // ○
+                    " ",
+                ])
+                .template("  {spinner} {msg}")
+                .unwrap(),
+        );
+        spinner.enable_steady_tick(Duration::from_millis(250));
         let hint = style("(Ctrl+C to interrupt)").dim();
         if Config::global()
             .get_param("RANDOM_THINKING_MESSAGES")
             .unwrap_or(false)
         {
-            spinner.start(format!(
+            spinner.set_message(format!(
                 "{}...  {}",
                 super::thinking::get_random_thinking_message(),
                 hint,
             ));
         } else {
-            spinner.start(format!("Thinking...  {}", hint));
+            spinner.set_message(format!("{}  {}", style("Thinking...").dim(), hint));
         }
         self.spinner = Some(spinner);
     }
 
     pub fn hide(&mut self) {
         if let Some(spinner) = self.spinner.take() {
-            spinner.stop("");
+            spinner.finish_and_clear();
         }
     }
 
@@ -210,8 +225,8 @@ pub fn is_showing_thinking() -> bool {
 pub fn set_thinking_message(s: &String) {
     if std::io::stdout().is_terminal() {
         THINKING.with(|t| {
-            if let Some(spinner) = t.borrow_mut().spinner.as_mut() {
-                spinner.set_message(s);
+            if let Some(spinner) = t.borrow_mut().spinner.as_ref() {
+                spinner.set_message(s.clone());
             }
         });
     }
@@ -898,14 +913,27 @@ fn render_subagent_tool_graph(subagent_id: &str, tool_graph: &[Value]) {
 
 // Helper functions
 
+fn tool_icon(tool_name: &str) -> &'static str {
+    match tool_name {
+        "shell" => "⌘",
+        "write" | "edit" => "✎",
+        "delegate" | "subagent" => "◈",
+        "execute" | "execute_code" => "⚡",
+        "load" => "↓",
+        "todo__write" => "☐",
+        _ => "▶",
+    }
+}
+
 fn print_tool_header(call: &CallToolRequestParams) {
     let (tool, extension) = split_tool_name(&call.name);
+    let icon = tool_icon(&tool);
     let tool_header = if extension.is_empty() {
-        format!("  {} {}", style("▶").dim(), style(&tool).dim())
+        format!("  {} {}", style(icon).dim(), style(&tool).dim())
     } else {
         format!(
             "  {} {} {}",
-            style("▶").dim(),
+            style(icon).dim(),
             style(&tool).dim(),
             style(extension).dim(),
         )
@@ -1254,21 +1282,13 @@ fn shorten_path(path: &str, debug: bool) -> String {
 }
 
 pub fn display_session_info(
-    resume: bool,
+    _resume: bool,
     provider: &str,
     model: &str,
-    session_id: &Option<String>,
+    _session_id: &Option<String>,
     provider_instance: Option<&Arc<dyn goose::providers::base::Provider>>,
 ) {
     set_terminal_title();
-
-    let status = if resume {
-        "resuming"
-    } else if session_id.is_none() {
-        "ephemeral"
-    } else {
-        "new session"
-    };
 
     let model_display = if let Some(provider_inst) = provider_instance {
         if let Some(lead_worker) = provider_inst.as_lead_worker() {
@@ -1286,22 +1306,34 @@ pub fn display_session_info(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // CC-style minimal startup
-    let version = env!("CARGO_PKG_VERSION");
+    // CC-style startup: brand mark + stacked info
+    //
+    //   ◆◇◆      Goose
+    //   ◇✻◇      claude-sonnet-direct · openai
+    //   ◆◇◆      ~/cDesign
+    //
+    let mark_col1 = style("◆◇◆").cyan();
+    let mark_col2 = style("◇✻◇").cyan().bold();
+    let mark_col3 = style("◆◇◆").cyan();
 
     println!();
-    println!("  {} {}", style("✻").bold(), style("Goose").bold());
     println!(
-        "  {} {} {} {}",
-        style(format!("v{}", version)).dim(),
+        "  {}      {}",
+        mark_col1,
+        style("Goose").bold(),
+    );
+    println!(
+        "  {}      {} {} {}",
+        mark_col2,
+        style(&model_display).cyan(),
         style("·").dim(),
         style(provider).dim(),
-        style(&model_display).cyan(),
     );
-    println!("  {}", style(&cwd_display).dim());
-    if let Some(id) = session_id {
-        println!("  {} {}", style(status).dim(), style(id).dim());
-    }
+    println!(
+        "  {}      {}",
+        mark_col3,
+        style(&cwd_display).dim(),
+    );
     println!();
 }
 
@@ -1311,7 +1343,16 @@ pub fn render_turn_separator() {
             .size_checked()
             .map(|(_h, w)| w as usize)
             .unwrap_or(80);
-        println!("\n{}\n", style("─".repeat(width)).dim());
+        // Centered ✻ divider
+        let label = " ✻ ";
+        let side = width.saturating_sub(label.len()) / 2;
+        let right = width.saturating_sub(side + label.len());
+        println!(
+            "\n{}{}{}\n",
+            style("─".repeat(side)).dim(),
+            style(label).dim(),
+            style("─".repeat(right)).dim(),
+        );
     }
 }
 

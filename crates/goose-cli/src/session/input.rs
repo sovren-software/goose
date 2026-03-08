@@ -402,7 +402,7 @@ fn get_input_prompt_string() -> String {
     if cfg!(target_os = "windows") {
         "> ".to_string()
     } else {
-        format!("{} ", console::style(">").bold())
+        format!("{} ", console::style("\u{276f}").bold())
     }
 }
 
@@ -697,8 +697,8 @@ mod tests {
         // Prompt should always end with a space
         assert!(prompt.ends_with(' '));
 
-        // Prompt should contain the > symbol
-        assert!(prompt.contains(">"));
+        // Prompt should contain the ❯ symbol
+        assert!(prompt.contains("\u{276f}"));
 
         #[cfg(target_os = "windows")]
         {

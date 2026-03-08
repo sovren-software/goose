@@ -777,6 +777,7 @@ mod tests {
             quiet: false,
             output_format: "text".to_string(),
             container: None,
+            no_tui: false,
         };
 
         assert_eq!(config.extensions.len(), 1);

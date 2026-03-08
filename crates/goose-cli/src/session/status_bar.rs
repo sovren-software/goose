@@ -166,7 +166,13 @@ impl StatusBar {
         execute!(stdout, cursor::MoveTo(0, bar_row))?;
         execute!(stdout, terminal::Clear(ClearType::CurrentLine))?;
 
-        let model_str = format!("{}", style(&state.model).cyan());
+        // CC-style: [Model] project   ━━╌╌╌ 0% | 0s
+        let model_str = format!(
+            "{}{}{}",
+            style("[").dim(),
+            style(&state.model).bold(),
+            style("]").dim(),
+        );
         let usage_bar = format_usage_bar(state.total_tokens, state.context_limit, 20);
         let token_str = format_tokens(state.total_tokens);
         let limit_str = format_tokens(state.context_limit);
@@ -178,15 +184,15 @@ impl StatusBar {
 
         let mut line1_parts: Vec<String> = vec![model_str];
         if !state.project.is_empty() {
-            line1_parts.push(format!("{}", style(&state.project).dim()));
+            line1_parts.push(format!("{}", style(&state.project).cyan()));
         }
         if !state.branch.is_empty() {
             line1_parts.push(format!("{}", style(&state.branch).dim()));
         }
 
-        let line1_left = line1_parts.join(&format!(" {} ", style("·").dim()));
+        let line1_left = line1_parts.join(&format!(" {} ", style("│").dim()));
         let line1_right = format!(
-            "{} {}% {}/{}",
+            "{} {}%  {}/{}",
             usage_bar,
             style(pct).dim(),
             style(token_str).dim(),
