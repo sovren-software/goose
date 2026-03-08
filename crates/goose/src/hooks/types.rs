@@ -51,6 +51,7 @@ pub enum HookEvent {
     },
     Stop {
         session_id: String,
+        last_assistant_text: String,
         cwd: PathBuf,
     },
 }
@@ -206,6 +207,19 @@ mod tests {
         assert!(obj.contains_key("tool_output"), "expected snake_case tool_output");
         assert!(obj.contains_key("cwd"), "expected lowercase cwd");
         assert!(!obj.contains_key("SessionId"), "PascalCase field names would break contrib hooks");
+    }
+
+    #[test]
+    fn stop_event_includes_last_assistant_text() {
+        let event = HookEvent::Stop {
+            session_id: "s1".into(),
+            last_assistant_text: "I completed the task.".into(),
+            cwd: "/tmp".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["hook_event_name"], "Stop");
+        assert_eq!(json["last_assistant_text"], "I completed the task.");
+        assert!(json.get("session_id").is_some());
     }
 
     #[test]

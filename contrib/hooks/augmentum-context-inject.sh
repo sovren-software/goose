@@ -5,9 +5,9 @@
 # (memory-inject.py, vault-inject.py, rule-apply.py) and aggregates their
 # output into a single context injection for the Goose agent runtime.
 #
-# This script is the formal boundary between the cognitive layer (dotfiles)
+# This script is the formal boundary between the cognitive layer (engram)
 # and the execution layer (Goose). See:
-#   ~/.dotfiles/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md
+#   ~/.engram/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md
 #
 # Wire up in ~/.config/goose/hooks.json:
 #   "UserPromptSubmit": [{"hooks": [{"type": "command",
@@ -32,7 +32,7 @@
 # Output: {"additionalContext": "...", "sources": {...}, "tier": "..."}
 #
 # Dependencies: python3, jq
-# Cognitive tools: ~/.dotfiles/.claude/hooks/{memory-inject,vault-inject,rule-apply}.py
+# Cognitive tools: ~/.engram/.claude/hooks/{memory-inject,vault-inject,rule-apply}.py
 # All tools gracefully degrade when embed-server is absent (FTS5/keyword-only).
 
 set -euo pipefail
@@ -41,10 +41,11 @@ set -euo pipefail
 INPUT=$(cat)
 
 # --- Locate cognitive tools ---
-DOTFILES="${HOME}/.dotfiles/.claude"
-MEMORY_INJECT="${DOTFILES}/hooks/memory-inject.py"
-VAULT_INJECT="${DOTFILES}/hooks/vault-inject.py"
-RULE_APPLY="${DOTFILES}/hooks/rule-apply.py"
+ENGRAM_DIR="${HOME}/.engram/.claude"
+MEMORY_INJECT="${ENGRAM_DIR}/hooks/memory-inject.py"
+# INTERIM: vault-hint.sh replaces retired vault-inject.py until augmentum-knowledge is built
+VAULT_INJECT="${HOME}/.config/goose/hooks/augmentum-vault-hint.sh"
+RULE_APPLY="${ENGRAM_DIR}/hooks/rule-apply.py"
 
 # Fail-open: if cognitive tools don't exist, emit nothing
 if [[ ! -f "$MEMORY_INJECT" && ! -f "$VAULT_INJECT" && ! -f "$RULE_APPLY" ]]; then
@@ -58,8 +59,17 @@ PROMPT=$(echo "$INPUT" | jq -r '.user_prompt // .prompt // empty' 2>/dev/null)
 TIER=$(echo "$INPUT" | jq -r '.tier // empty' 2>/dev/null)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 
-# Default tier
-TIER="${TIER:-balanced}"
+# Classify by word count if no explicit tier override from CQI v1 input
+if [[ -z "$TIER" ]]; then
+    WORD_COUNT=$(echo "$PROMPT" | wc -w | tr -d ' ')
+    if [[ "$WORD_COUNT" -lt 10 ]]; then
+        TIER="terse"
+    elif [[ "$WORD_COUNT" -lt 50 ]]; then
+        TIER="balanced"
+    else
+        TIER="thorough"
+    fi
+fi
 TIER_UPPER=$(echo "$TIER" | tr '[:lower:]' '[:upper:]')
 
 # Default cwd to current directory
@@ -109,14 +119,14 @@ if [[ -n "$PROMPT" && -f "$MEMORY_INJECT" ]]; then
     fi
 fi
 
-# Vault injection (if prompt is non-empty and has enough words)
+# Vault injection (if prompt is non-empty)
+# INTERIM: uses bash vault-hint.sh instead of retired python vault-inject.py
 if [[ -n "$PROMPT" && -f "$VAULT_INJECT" ]]; then
-    VAULT_RAW=$(echo "$TOOL_INPUT" | python3 "$VAULT_INJECT" 2>/dev/null) || true
+    VAULT_RAW=$(echo "$TOOL_INPUT" | bash "$VAULT_INJECT" 2>/dev/null) || true
     if [[ -n "$VAULT_RAW" ]]; then
         VAULT_OUTPUT=$(echo "$VAULT_RAW" | jq -r '.additionalContext // empty' 2>/dev/null)
         if [[ -n "$VAULT_OUTPUT" ]]; then
-            # Count notes from the yaml block (lines with "    - path:")
-            VAULT_COUNT=$(echo "$VAULT_OUTPUT" | grep -c 'path:' 2>/dev/null || echo 0)
+            VAULT_COUNT=$(echo "$VAULT_RAW" | jq -r '.vault_count // 0' 2>/dev/null) || VAULT_COUNT=0
         fi
     fi
 fi

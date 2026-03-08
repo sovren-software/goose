@@ -1854,6 +1854,7 @@ impl Agent {
             hooks.emit(
                 HookEvent::Stop {
                     session_id: session_id.clone(),
+                    last_assistant_text: last_assistant_text.clone(),
                     cwd: working_dir.clone(),
                 },
                 &working_dir,
