@@ -37,8 +37,14 @@ impl HookRuntime {
     ) -> HookOutcome {
         let event_configs = self.config.get_hooks_for_event(event.kind());
         if event_configs.is_empty() {
+            tracing::info!("No hooks configured for event {}", event.kind());
             return HookOutcome::default();
         }
+        tracing::info!(
+            "Running {} hook group(s) for event {}",
+            event_configs.len(),
+            event.kind()
+        );
 
         let stdin_json = match serde_json::to_string(&event) {
             Ok(json) => json,
@@ -70,6 +76,12 @@ impl HookRuntime {
 
                         match result {
                             Ok(output) => {
+                                tracing::info!(
+                                    "Hook for {} exited {:?}, stdout {} bytes",
+                                    event.kind(),
+                                    output.exit_code,
+                                    output.stdout.len()
+                                );
                                 if output.timed_out {
                                     tracing::warn!(
                                         "Hook timed out after {}s, failing open",
@@ -129,6 +141,12 @@ impl HookRuntime {
         }
 
         if !contexts.is_empty() {
+            tracing::info!(
+                "Hook {} produced {} context chunk(s), total {} bytes",
+                event.kind(),
+                contexts.len(),
+                contexts.iter().map(|c| c.len()).sum::<usize>()
+            );
             let mut joined = contexts.join("\n");
             if joined.len() > MAX_CONTEXT_LEN {
                 tracing::warn!(
