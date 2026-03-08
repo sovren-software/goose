@@ -141,29 +141,19 @@ impl Hooks {
                 );
 
                 let args = serde_json::json!({"command": shell_cmd});
-                Ok((
-                    CallToolRequestParams {
-                        meta: None,
-                        task: None,
-                        name: "developer__shell".into(),
-                        arguments: args.as_object().cloned(),
-                    },
-                    *timeout,
-                ))
+                let mut params = CallToolRequestParams::new("developer__shell");
+                params.arguments = args.as_object().cloned();
+                Ok((params, *timeout))
             }
             HookAction::McpTool {
                 tool,
                 arguments,
                 timeout,
-            } => Ok((
-                CallToolRequestParams {
-                    meta: None,
-                    task: None,
-                    name: tool.clone().into(),
-                    arguments: Some(arguments.clone()),
-                },
-                *timeout,
-            )),
+            } => {
+                let mut params = CallToolRequestParams::new(tool.clone());
+                params.arguments = Some(arguments.clone());
+                Ok((params, *timeout))
+            }
         }
     }
 
