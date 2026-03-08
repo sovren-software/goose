@@ -5,6 +5,7 @@ mod elicitation;
 mod export;
 mod input;
 mod output;
+pub mod status_bar;
 pub mod streaming_buffer;
 mod task_execution_display;
 mod thinking;
@@ -166,6 +167,8 @@ pub struct CliSession {
     edit_mode: Option<EditMode>,
     retry_config: Option<RetryConfig>,
     output_format: String,
+    tui_enabled: bool,
+    status_bar: Option<status_bar::StatusBar>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +245,7 @@ impl CliSession {
         edit_mode: Option<EditMode>,
         retry_config: Option<RetryConfig>,
         output_format: String,
+        tui_enabled: bool,
     ) -> Self {
         let messages = agent
             .config
@@ -263,6 +267,8 @@ impl CliSession {
             edit_mode,
             retry_config,
             output_format,
+            tui_enabled,
+            status_bar: None,
         }
     }
 
@@ -479,8 +485,21 @@ impl CliSession {
         let history_manager = HistoryManager::new();
         history_manager.load(&mut editor);
 
+        // Initialize status bar if TUI is enabled
+        if self.tui_enabled {
+            let state = self.build_status_bar_state().await;
+            let mut bar = status_bar::StatusBar::new(state);
+            if bar.setup().is_ok() {
+                self.status_bar = Some(bar);
+            }
+        }
+
         loop {
-            self.display_context_usage().await?;
+            if self.status_bar.is_some() {
+                self.update_status_bar().await;
+            } else {
+                self.display_context_usage().await?;
+            }
 
             let conversation_strings: Vec<String> = self
                 .messages
@@ -494,13 +513,29 @@ impl CliSession {
                 })
                 .collect();
 
+            // Pause status bar for input
+            if let Some(ref mut bar) = self.status_bar {
+                let _ = bar.pause();
+            }
+
             output::run_status_hook("waiting");
             let input = input::get_input(&mut editor, Some(&conversation_strings))?;
+
+            // Resume status bar after input
+            if let Some(ref mut bar) = self.status_bar {
+                let _ = bar.resume();
+            }
+
             if matches!(input, InputResult::Exit) {
                 break;
             }
             self.handle_input(input, &history_manager, &mut editor)
                 .await?;
+        }
+
+        // Teardown status bar before close message
+        if let Some(ref mut bar) = self.status_bar {
+            let _ = bar.teardown();
         }
 
         println!(
@@ -630,6 +665,7 @@ impl CliSession {
 
                 let _provider = self.agent.provider().await?;
 
+                output::render_turn_separator();
                 output::run_status_hook("thinking");
                 output::show_thinking();
                 let start_time = Instant::now();
@@ -1338,6 +1374,94 @@ impl CliSession {
         }
 
         Ok(())
+    }
+
+    /// Build initial status bar state from current session.
+    async fn build_status_bar_state(&self) -> status_bar::StatusBarState {
+        let config = Config::global();
+        let provider_name = config
+            .get_goose_provider()
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let model_name = if let Ok(provider) = self.agent.provider().await {
+            let mc = provider.get_model_config();
+            mc.model_name.clone()
+        } else {
+            String::new()
+        };
+
+        let context_limit = if let Ok(provider) = self.agent.provider().await {
+            provider.get_model_config().context_limit()
+        } else {
+            0
+        };
+
+        let project = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+
+        let branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        let extensions_count = self.agent.list_extensions().await.len();
+
+        let mode = match self.run_mode {
+            RunMode::Normal => "chat",
+            RunMode::Plan => "plan",
+        };
+
+        status_bar::StatusBarState {
+            model: model_name,
+            provider: provider_name,
+            project,
+            branch,
+            mode: mode.to_string(),
+            extensions_count,
+            total_tokens: 0,
+            context_limit,
+            cost: None,
+            processing: false,
+        }
+    }
+
+    /// Update the status bar with current token usage.
+    async fn update_status_bar(&self) {
+        let bar = match self.status_bar.as_ref() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let (total_tokens, context_limit) = if let Ok(provider) = self.agent.provider().await {
+            let mc = provider.get_model_config();
+            let limit = mc.context_limit();
+            let tokens = self
+                .get_session()
+                .await
+                .ok()
+                .and_then(|m| m.total_tokens)
+                .unwrap_or(0) as usize;
+            (tokens, limit)
+        } else {
+            (0, 0)
+        };
+
+        let mode = match self.run_mode {
+            RunMode::Normal => "chat",
+            RunMode::Plan => "plan",
+        };
+        let mode = mode.to_string();
+
+        let _ = bar.update_state(|s| {
+            s.total_tokens = total_tokens;
+            s.context_limit = context_limit;
+            s.mode = mode;
+        });
     }
 
     /// Handle prompt command execution

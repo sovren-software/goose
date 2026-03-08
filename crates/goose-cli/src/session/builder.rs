@@ -12,11 +12,29 @@ use goose::session::session_manager::SessionType;
 use goose::session::EnabledExtensionsState;
 use rustyline::EditMode;
 use std::collections::BTreeSet;
+use std::io::IsTerminal;
 use std::process;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
 const EXTENSION_HINT_MAX_LEN: usize = 5;
+
+/// Determine if the persistent TUI status bar should be enabled.
+fn should_enable_tui(config: &SessionBuilderConfig) -> bool {
+    if config.no_tui {
+        return false;
+    }
+    if std::env::var("GOOSE_TUI").as_deref() == Ok("0") {
+        return false;
+    }
+    if !std::io::stdout().is_terminal() {
+        return false;
+    }
+    if config.output_format != "text" {
+        return false;
+    }
+    config.interactive
+}
 
 fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     let truncated: String = s.chars().take(max_len).collect();
@@ -116,6 +134,8 @@ pub struct SessionBuilderConfig {
     pub output_format: String,
     /// Docker container to run stdio extensions inside
     pub container: Option<Container>,
+    /// Disable persistent TUI status bar
+    pub no_tui: bool,
 }
 
 /// Manual implementation of Default to ensure proper initialization of output_format
@@ -143,6 +163,7 @@ impl Default for SessionBuilderConfig {
             quiet: false,
             output_format: "text".to_string(),
             container: None,
+            no_tui: false,
         }
     }
 }
@@ -233,6 +254,7 @@ async fn offer_extension_debugging_help(
         None,
         None,
         "text".to_string(),
+        false,
     )
     .await;
 
@@ -696,6 +718,8 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
 
     let debug_mode = session_config.debug || config.get_param("GOOSE_DEBUG").unwrap_or(false);
 
+    let tui_enabled = should_enable_tui(&session_config);
+
     let session = CliSession::new(
         Arc::try_unwrap(agent_ptr).unwrap_or_else(|_| panic!("There should be no more references")),
         session_id.clone(),
@@ -705,6 +729,7 @@ pub async fn build_session(session_config: SessionBuilderConfig) -> CliSession {
         edit_mode,
         recipe.and_then(|r| r.retry.clone()),
         session_config.output_format.clone(),
+        tui_enabled,
     )
     .await;
 

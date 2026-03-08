@@ -126,7 +126,7 @@ impl ThinkingIndicator {
         let hint = style("(Ctrl+C to interrupt)").dim();
         if Config::global()
             .get_param("RANDOM_THINKING_MESSAGES")
-            .unwrap_or(true)
+            .unwrap_or(false)
         {
             spinner.start(format!(
                 "{}...  {}",
@@ -687,7 +687,7 @@ fn render_execute_code_request(call: &CallToolRequestParams, debug: bool) {
     println!();
     println!(
         "  {} {} {} tool call{}",
-        style("▸").dim(),
+        style("▶").dim(),
         style("execute").dim(),
         style(count).dim(),
         plural,
@@ -840,7 +840,7 @@ pub fn render_subagent_tool_call(
     }
     let tool_header = format!(
         "  {} {}",
-        style("▸").dim(),
+        style("▶").dim(),
         style(format_subagent_tool_call_message(subagent_id, tool_name)).dim(),
     );
     println!();
@@ -856,7 +856,7 @@ fn render_subagent_tool_graph(subagent_id: &str, tool_graph: &[Value]) {
     println!();
     println!(
         "  {} {} {} {} tool call{}",
-        style("▸").dim(),
+        style("▶").dim(),
         style(format!("[subagent:{}]", short_id)).dim(),
         style("execute_code").dim(),
         style(count).dim(),
@@ -901,13 +901,13 @@ fn render_subagent_tool_graph(subagent_id: &str, tool_graph: &[Value]) {
 fn print_tool_header(call: &CallToolRequestParams) {
     let (tool, extension) = split_tool_name(&call.name);
     let tool_header = if extension.is_empty() {
-        format!("  {} {}", style("▸").dim(), style(&tool).dim())
+        format!("  {} {}", style("▶").dim(), style(&tool).dim())
     } else {
         format!(
             "  {} {} {}",
-            style("▸").dim(),
+            style("▶").dim(),
             style(&tool).dim(),
-            style(extension).magenta().dim(),
+            style(extension).dim(),
         )
     };
     println!();
@@ -1133,9 +1133,9 @@ fn print_value(value: &Value, debug: bool, reserve_width: usize) {
             (Some(w), false) if s.len() > w => style(safe_truncate(s, w)),
             _ => style(s.to_string()),
         }
-        .green(),
-        Value::Number(n) => style(n.to_string()).yellow(),
-        Value::Bool(b) => style(b.to_string()).yellow(),
+        .dim(),
+        Value::Number(n) => style(n.to_string()).dim(),
+        Value::Bool(b) => style(b.to_string()).dim(),
         Value::Null => style("null".to_string()).dim(),
         _ => unreachable!(),
     };
@@ -1286,39 +1286,33 @@ pub fn display_session_info(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // ASCII art goose with session info on the right
+    // CC-style minimal startup
+    let version = env!("CARGO_PKG_VERSION");
+
     println!();
+    println!("  {} {}", style("✻").bold(), style("Goose").bold());
     println!(
-        "  {}  {} {} {} {} {}",
-        style("  __( O)>").white(),
-        style("●").green(),
-        style(status).dim(),
+        "  {} {} {} {}",
+        style(format!("v{}", version)).dim(),
         style("·").dim(),
         style(provider).dim(),
         style(&model_display).cyan(),
     );
-
+    println!("  {}", style(&cwd_display).dim());
     if let Some(id) = session_id {
-        println!(
-            "  {}  {} {} {}",
-            style(r" \____)").white(),
-            style(" ").dim(),
-            style(id).dim(),
-            style(format!("· {}", cwd_display)).dim(),
-        );
-    } else {
-        println!(
-            "  {}  {} {}",
-            style(r" \____)").white(),
-            style(" ").dim(),
-            style(format!("  {}", cwd_display)).dim(),
-        );
+        println!("  {} {}", style(status).dim(), style(id).dim());
     }
-    println!(
-        "  {}  {}",
-        style("   L L").white(),
-        style("   goose is ready").white()
-    );
+    println!();
+}
+
+pub fn render_turn_separator() {
+    if std::io::stdout().is_terminal() {
+        let width = Term::stdout()
+            .size_checked()
+            .map(|(_h, w)| w as usize)
+            .unwrap_or(80);
+        println!("\n{}\n", style("─".repeat(width)).dim());
+    }
 }
 
 fn set_terminal_title() {
@@ -1332,7 +1326,7 @@ fn set_terminal_title() {
     // Sanitize: strip control characters (ESC, BEL, etc.) to prevent terminal escape injection
     let sanitized: String = dir_name.chars().filter(|c| !c.is_control()).collect();
     // OSC 0 sets the terminal window/tab title
-    print!("\x1b]0;🪿 {}\x07", sanitized);
+    print!("\x1b]0;✻ {}\x07", sanitized);
     let _ = std::io::stdout().flush();
 }
 

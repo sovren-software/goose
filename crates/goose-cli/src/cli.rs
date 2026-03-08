@@ -103,6 +103,13 @@ pub struct SessionOptions {
         long_help = "Run extensions (stdio and built-in) inside the specified container. The extension must exist in the container. For built-in extensions, goose must be installed inside the container."
     )]
     pub container: Option<String>,
+
+    #[arg(
+        long = "no-tui",
+        help = "Disable persistent status bar",
+        long_help = "Disable the persistent status bar at the bottom of the terminal. Useful for screen readers, piped output, or minimal environments."
+    )]
+    pub no_tui: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1161,6 +1168,7 @@ async fn handle_interactive_session(
         quiet: false,
         output_format: "text".to_string(),
         container: session_opts.container.map(Container::new),
+        no_tui: session_opts.no_tui,
     })
     .await;
 
@@ -1366,6 +1374,7 @@ async fn handle_run_command(
         quiet: output_opts.quiet,
         output_format: output_opts.output_format,
         container: session_opts.container.map(Container::new),
+        no_tui: session_opts.no_tui,
     })
     .await;
 
@@ -1652,6 +1661,7 @@ async fn handle_default_session() -> Result<()> {
         quiet: false,
         output_format: "text".to_string(),
         container: None,
+        no_tui: false,
     })
     .await;
     session.interactive(None).await
