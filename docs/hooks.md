@@ -199,16 +199,22 @@ Matcher values: `"manual"` or `"auto"` to filter by compaction type.
 
 ### Stop
 
-Fires when the agent reply stream finishes.
+Fires when the agent reply stream finishes. Can block to surface unfinished-work
+indicators back to the agent.
 
 **Input:**
 ```json
 {
   "hook_event_name": "Stop",
   "session_id": "abc-123",
+  "last_assistant_text": "Full text of the last assistant message",
   "cwd": "/home/user/project"
 }
 ```
+
+`last_assistant_text` contains the complete text of the agent's final reply. Use this
+field to scan for unfinished-work patterns (TODO, "next steps", "still needs to", etc.)
+and return `{"decision": "block"}` to surface them back to the agent.
 
 ## Output Protocol
 
@@ -251,6 +257,6 @@ See `contrib/hooks/` for production hook implementations:
 - `augmentum-context-inject.sh` — CQI v1 bridge (memory, vault, rules injection)
 - `augmentum-permit-check.sh` — session scope enforcement from `/run/augmentum/permits.json`
 - `augmentum-pre-tool-use.sh` — shell command audit logger
-- `augmentum-session-stop.sh` — session telemetry
+- `augmentum-session-stop.sh` — keyword stop gate + session telemetry
 
 Install: `cp contrib/config/hooks.json ~/.config/goose/hooks.json`

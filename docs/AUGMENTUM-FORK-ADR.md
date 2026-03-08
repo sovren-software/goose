@@ -92,14 +92,14 @@ merging their branch — eliminates conflicts in all shared files.
 ## Decision 3: Cognitive Layer Stays in Dotfiles, Not in Goose
 
 **Decision:** All behavioral intelligence (memory, vault, rules, skills) remains in
-`~/.dotfiles/.claude/`. Goose accesses it exclusively through the CQI v1 bridge
+`~/.engram/.claude/`. Goose accesses it exclusively through the CQI v1 bridge
 (`augmentum-context-inject.sh`). No cognitive Python is vendored into the Goose repo.
 
 **Rationale:** The cognitive layer must be runtime-agnostic. Claude Code and Goose sessions
 run in parallel; both should benefit from the same memory and rules without duplication.
 Vendoring intelligence into Goose would create two diverging cognitive stacks.
 
-**Interface spec:** `~/.dotfiles/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md`
+**Interface spec:** `~/.engram/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md`
 
 **Expected benefits:**
 - Improvements to memory retrieval, vault injection, or rules scoring automatically improve
@@ -110,7 +110,7 @@ Vendoring intelligence into Goose would create two diverging cognitive stacks.
 - Cognitive tools (`memory-inject.py`, `vault-inject.py`, `rule-apply.py`) must be present
   on every machine where Goose is deployed. They live in `~/.dotfiles/` which is fleet-synced
   — but dotfiles sync must precede Goose deployment.
-- The embed-server (`~/.dotfiles/.claude/hooks/embed-server.py`) runs per Claude Code session
+- The embed-server (`~/.engram/.claude/hooks/embed-server.py`) runs per Claude Code session
   but not per Goose session. Goose sessions degrade to FTS5-only memory search without it.
   A persistent embed-server as a systemd user service would fix this.
 
@@ -176,6 +176,7 @@ Input fields (stdin JSON). All field names are snake_case.
 | `before_count` | Messages before compact | PostCompact |
 | `after_count` | Messages after compact | PostCompact |
 | `manual` | Whether compact was user-triggered | PreCompact, PostCompact |
+| `last_assistant_text` | Full text of agent's final reply | Stop |
 
 Output (stdout JSON, all lowercase):
 
@@ -293,6 +294,9 @@ Dynamic model selection per turn: fast model for simple responses, reasoning mod
 | Persistent embed-server | Per-session subprocess | Not wired for Goose | Low (FTS5 fallback active) |
 | PostCompact context reinject | Via PostCompact hook | Available via upstream hooks | Resolved (hook wired) |
 | Self-healing system ops | N/A (terminal-focused) | `augmentum-system` MCP (14 tools) | **Resolved** (2026-02-25) |
+| Tier classification | Token-economy tiers by complexity | ~~Hardcoded BALANCED~~ | **Resolved** (2026-03-08) |
+| Stop gate / completion enforcement | `stop-completion-check.sh` | ~~No equivalent~~ | **Resolved** (2026-03-08) |
+| Auto-skill drafting | None | `session-receipt.sh` → `pending-skills/` | **New** (2026-03-08) |
 
 ---
 
@@ -356,8 +360,81 @@ creating merge conflicts at every upstream sync. 106 commits behind with 3 break
 
 ---
 
+## Decision 6: Hermes-Parity Quality Improvements (2026-03-08)
+
+**Decision:** Close three enforcement gaps identified by comparing Goose quality controls
+against Hermes Agent and Claude Code:
+
+1. **Adaptive tier classification** — replace hardcoded `TIER=balanced` in
+   `augmentum-context-inject.sh` with word-count thresholds matching `token-economy.sh`.
+2. **Keyword stop gate** — add Phase 2 keyword scan to `augmentum-session-stop.sh`,
+   enabled by adding `last_assistant_text` to `HookEvent::Stop` in Rust.
+3. **Auto-skill drafting** — extend `session-receipt.sh` to draft JSON stubs for
+   high-signal patterns (`new_rule`, `hook_modified`, `large_session`) into a
+   `pending-skills/` review queue.
+
+**Rationale:**
+
+The CQI bridge was serving uniform BALANCED context to every prompt regardless of complexity.
+A 3-word "fix it" prompt has different context needs than a 50-word architecture question.
+Hermes Agent's adaptive-context pattern addresses exactly this waste; our token-economy
+thresholds already defined the right boundaries — they just weren't applied to Goose.
+
+The stop gate gap was structural: `HookEvent::Stop` had no `last_assistant_text` field, so
+keyword scanning was architecturally impossible without reading session files at stop time
+(fragile, slow). Adding the field at the emission site (`agent.rs:1855`) was a zero-logic
+wiring change — the text was already collected at `agent.rs:1351`.
+
+Auto-skill drafting closes the gap between pattern detection (already wired since 2026-03-02)
+and artifact generation. The session-receipt hook detected `new_rule` and `hook_modified` events
+and logged them to `pattern-feedback.jsonl`, then discarded them. Hermes generates skill stubs
+automatically from detected patterns. The fix is a third Python stage that produces idempotent
+draft JSONs for human review.
+
+**Key decisions:**
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Tier thresholds | <10 terse, 10-49 balanced, 50+ thorough | Match `token-economy.sh` exactly |
+| Tier measurement | `wc -w` word count | Simple, no subjectivity, <1ms overhead |
+| Pattern matching style | Glob (`==`) not ERE (`=~`) | Apostrophes in `haven't`/`i'll` are fragile in bash ERE |
+| Meta-discussion guard | Pattern family (`hook scan`, `hook block`, etc.) | Descriptive references bypass same as direct naming |
+| Skill drafts location | `data/pending-skills/` (gitignored) | Runtime queue; human review required before any persistence |
+| Idempotency | `sha256(session_id:entity_name)[:12]` filename | Re-running receipt for same session produces no duplicates |
+
+**Expected benefits:**
+- Short Goose prompts use TERSE budget (less context injected, faster turns)
+- Complex Goose prompts get THOROUGH budget (full memory + vault + rules)
+- Unfinished-work indicators in last assistant message surface back to agent
+- Session patterns generate reviewable drafts rather than silently expiring in logs
+
+**Trade-offs:**
+- `wc -w` spawns a subprocess on every UserPromptSubmit. Measured at <1ms; negligible.
+- Keyword stop gate has false-positive risk on technical messages containing "next step"
+  literally (e.g., a tutorial step numbered "next step 3"). Mitigated by meta-discussion
+  guard and 3-continuation cap per session.
+
+**Drawbacks / Known Limitations:**
+- Stop gate Phase 1 (contract-based verification via frame-prompt sidecar) not ported —
+  requires Claude Code–specific sidecar infrastructure. Keyword scan only for Goose v1.
+- Stop gate Phase 3 (semantic check via LiteLLM) not ported — adds latency and a network
+  dependency in the Stop hook path. Out of scope for v1.
+- `pending-skills/` queue has no processing step. Drafts accumulate until manually reviewed.
+  A future `/review-pending` skill or weekly-consolidation step should process the queue.
+- Code-fence guard is shallow: checks whether blocked keyword appears between backtick
+  fences, but does not parse multi-line code blocks correctly. Sufficient for common cases.
+
+**Files changed:**
+- `crates/goose/src/hooks/types.rs` — `last_assistant_text: String` added to `Stop` variant
+- `crates/goose/src/agents/agent.rs` — field wired at emission site
+- `contrib/hooks/augmentum-context-inject.sh` — word-count tier classification
+- `contrib/hooks/augmentum-session-stop.sh` — keyword stop gate (Phase 2)
+- `~/.engram/.claude/hooks/session-receipt.sh` — auto-skill drafting stage
+
+---
+
 ## Relationship to Other ADRs
 
-- `~/.dotfiles/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md` — boundary definition, CQI v1 spec
-- `~/.dotfiles/.claude/docs/architecture/NERVOUS-SYSTEM-ARCHITECTURE.md` — cognitive layer hook pipeline internals
+- `~/.engram/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md` — boundary definition, CQI v1 spec
+- `~/.engram/.claude/docs/architecture/NERVOUS-SYSTEM-ARCHITECTURE.md` — cognitive layer hook pipeline internals
 - `~/cDesign/augmentum-os/docs/core/TWO-LAYER-ARCHITECTURE.md` — L0/L1 split; Goose lives in L1
