@@ -17,7 +17,7 @@ workspace = true
 
 [dependencies]
 lru = { workspace = true }
-glob = "0.3"
+glob = "0.3"  # Used by hooks module matcher
 
 rmcp = { workspace = true, features = [
     "client",

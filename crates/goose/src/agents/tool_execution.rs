@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::permission::PermissionLevel;
-use crate::hooks::Hooks;
+use crate::hooks::{HookEvent, HookRuntime};
 use crate::mcp_utils::ToolResult;
 use crate::permission::Permission;
 use rmcp::model::{Content, ServerNotification};
@@ -59,7 +59,7 @@ impl Agent {
         cancellation_token: Option<CancellationToken>,
         session: &'a Session,
         inspection_results: &'a [crate::tool_inspection::InspectionResult],
-        hooks: &'a Hooks,
+        hooks: &'a HookRuntime,
     ) -> BoxStream<'a, anyhow::Result<Message>> {
         try_stream! {
         for request in tool_requests.iter() {
@@ -101,24 +101,17 @@ impl Agent {
 
                         if confirmation.permission == Permission::AllowOnce || confirmation.permission == Permission::AlwaysAllow {
                             // Fire PreToolUse hook — if blocked, treat as declined
-                            let invocation = crate::hooks::HookInvocation::pre_tool_use(
-                                session.id.clone(),
-                                tool_call.name.to_string(),
-                                serde_json::to_value(&tool_call.arguments)
-                                    .unwrap_or(serde_json::Value::Null),
-                                session.working_dir.to_string_lossy().to_string(),
-                            );
-                            let outcome = hooks
-                                .run(
-                                    invocation,
-                                    &self.extension_manager,
-                                    &session.working_dir,
-                                    cancellation_token.clone().unwrap_or_default(),
-                                )
-                                .await
-                                .unwrap_or_default();
+                            let outcome = hooks.emit(
+                                HookEvent::PreToolUse {
+                                    session_id: session.id.clone(),
+                                    tool_name: tool_call.name.to_string(),
+                                    tool_input: serde_json::to_value(&tool_call.arguments).unwrap_or_default(),
+                                    cwd: session.working_dir.clone(),
+                                },
+                                &session.working_dir,
+                                cancellation_token.clone().unwrap_or_default(),
+                            ).await;
                             if outcome.blocked {
-                                // Hook blocked — treat same as user declining
                                 if let Some(response_msg) = request_to_response_map.get(&request.id) {
                                     let mut response = response_msg.lock().await;
                                     *response = response.clone().with_tool_response_with_metadata(

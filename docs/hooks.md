@@ -54,10 +54,11 @@ Project hooks are merged with global hooks (both run).
 
 ### Hook Action Types
 
+Only `command` actions are supported. Hooks execute as direct subprocesses — no MCP extension required.
+
 | Type | Description |
 |------|-------------|
 | `command` | Shell command. Receives JSON on stdin, returns JSON on stdout. |
-| `mcp_tool` | MCP tool invocation via ExtensionManager. |
 
 ### Fields (Command Action)
 
@@ -70,8 +71,9 @@ Project hooks are merged with global hooks (both run).
 
 The optional `matcher` field filters which tool calls trigger the hook:
 
-- `"developer__shell"` — direct tool name match
-- `"Bash"` — Claude Code compatibility alias for developer__shell
+- `"shell"` — platform extension tool name (preferred)
+- `"developer__shell"` — namespaced form (also accepted)
+- `"Bash"` — Claude Code compatibility alias for shell / developer__shell
 - `"Bash(git *)"` — matches shell commands matching the glob pattern
 
 ## Events
@@ -91,7 +93,7 @@ Fires once on the first user message in a session. Context returned is injected 
 
 **Output:**
 ```json
-{"additionalContext": "Text to inject into the conversation"}
+{"additional_context": "Text to inject into the conversation"}
 ```
 
 Plain text stdout is also accepted (treated as context injection).
@@ -112,7 +114,7 @@ Fires on each user message before the agent processes it. Can block the prompt o
 
 **Output:**
 ```json
-{"additionalContext": "Per-turn context to inject"}
+{"additional_context": "Per-turn context to inject"}
 ```
 
 Exit code 2 blocks the prompt entirely.
@@ -132,10 +134,7 @@ Fires before each tool call. Can block tool execution.
 }
 ```
 
-**Blocking:** Exit code 2 blocks the tool call. Or return JSON:
-```json
-{"decision": "Block"}
-```
+**Blocking:** Exit code 2 blocks the tool call. Or return JSON with `"decision": "block"` (lowercase).
 
 ### PostToolUse
 
@@ -148,7 +147,7 @@ Fires after each successful tool call. Can inject context.
   "session_id": "abc-123",
   "tool_name": "developer__shell",
   "tool_input": {"command": "ls /tmp"},
-  "tool_output": ["file1.txt", "file2.txt"],
+  "tool_output": "file1.txt\nfile2.txt",
   "cwd": "/home/user/project"
 }
 ```
@@ -178,13 +177,23 @@ Fire before and after conversation compaction (auto or manual).
 {
   "hook_event_name": "PreCompact",
   "session_id": "abc-123",
-  "pre_compact_message_count": 42,
-  "manual_compact": false,
+  "message_count": 42,
+  "manual": false,
   "cwd": "/home/user/project"
 }
 ```
 
-**PostCompact** adds `post_compact_message_count`.
+**Input (PostCompact):**
+```json
+{
+  "hook_event_name": "PostCompact",
+  "session_id": "abc-123",
+  "before_count": 42,
+  "after_count": 8,
+  "manual": false,
+  "cwd": "/home/user/project"
+}
+```
 
 Matcher values: `"manual"` or `"auto"` to filter by compaction type.
 
@@ -205,24 +214,34 @@ Fires when the agent reply stream finishes.
 
 | Exit Code | Meaning |
 |-----------|---------|
-| 0 | Allow. Parse stdout as JSON. Non-JSON stdout becomes `additionalContext`. |
-| 2 | Block (for blockable events: PreToolUse, UserPromptSubmit, Stop, etc.) |
+| 0 | Allow. Parse stdout as JSON. Non-JSON stdout becomes `additional_context`. |
+| 2 | Block (for blockable events: PreToolUse, UserPromptSubmit, PreCompact, Stop) |
 | Other | Fail-open. Hook error logged, execution continues. |
 
 **JSON output fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `additionalContext` | string | Context to inject into the conversation |
-| `decision` | `"Allow"` or `"Block"` | Override for blockable events |
+| `additional_context` | string | Context to inject into the conversation (`additionalContext` also accepted) |
+| `decision` | `"allow"` or `"block"` | Override for blockable events (lowercase). Honored at both exit 0 and exit 2. |
+| `reason` | string | Optional reason string (logged, not injected) |
 
 ## Multiple Hooks Per Event
 
-Multiple hook actions run sequentially within each event config. Execution short-circuits on block. Context from all hooks is concatenated.
+Multiple hook actions run sequentially within each event config. Execution short-circuits on block. Context from all hooks is concatenated (truncated at 32KB total).
 
 ## Failure Handling
 
-All hook failures are **fail-open**: errors and timeouts are logged but never break the agent's normal operation.
+All hook failures are **fail-open**: errors and timeouts are logged but never break the agent's normal operation. A hook that times out is killed and execution continues.
+
+## Execution Model
+
+Hooks run as direct subprocesses via `/bin/bash -c <command>` (unix) or `cmd /C <command>` (windows). Key properties:
+
+- **Process group isolation** — placed in own process group on unix; terminal SIGINT does not kill hooks
+- **Deadlock-safe I/O** — stdout/stderr drained concurrently before stdin write
+- **Cancellation** — killed when the agent session's cancellation token fires
+- **No extension dependency** — hooks run regardless of which MCP extensions are loaded
 
 ## Augmentum OS Hooks
 

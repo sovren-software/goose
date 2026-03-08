@@ -4,9 +4,8 @@ use anyhow::{anyhow, Result};
 
 use crate::context_mgmt::compact_messages;
 use crate::conversation::message::{Message, SystemNotificationType};
-use crate::hooks::Hooks;
+use crate::hooks::{HookEvent, HookRuntime};
 use crate::recipe::build_recipe::build_recipe_from_template_with_positional_params;
-
 use tokio_util::sync::CancellationToken;
 
 use super::Agent;
@@ -89,22 +88,18 @@ impl Agent {
             .conversation
             .ok_or_else(|| anyhow!("Session has no conversation"))?;
 
-        // Load hooks and fire PreCompact
-        let hooks = Hooks::load(&session.working_dir);
-        let invocation = crate::hooks::HookInvocation::pre_compact(
-            session_id.to_string(),
-            conversation.messages().len(),
-            true, // manual = true for /compact command
-            session.working_dir.to_string_lossy().to_string(),
-        );
-        let _ = hooks
-            .run(
-                invocation,
-                &self.extension_manager,
-                &session.working_dir,
-                CancellationToken::new(),
-            )
-            .await;
+        // Fire PreCompact hook
+        let hooks = HookRuntime::load(&session.working_dir);
+        hooks.emit(
+            HookEvent::PreCompact {
+                session_id: session_id.to_string(),
+                message_count: conversation.messages().len(),
+                manual: true,
+                cwd: session.working_dir.clone(),
+            },
+            &session.working_dir,
+            CancellationToken::new(),
+        ).await;
 
         let pre_compact_len = conversation.messages().len();
         let (compacted_conversation, usage) = compact_messages(
@@ -114,8 +109,6 @@ impl Agent {
             true, // is_manual_compact
         )
         .await?;
-        let post_compact_len = compacted_conversation.messages().len();
-
         manager
             .replace_conversation(session_id, &compacted_conversation)
             .await?;
@@ -123,23 +116,18 @@ impl Agent {
         self.update_session_metrics(session_id, session.schedule_id, &usage, true)
             .await?;
 
-        // Fire PostCompact hook and inject context if any.
-        // The helper also pushes to the in-memory conversation, but we don't need
-        // that here — session persistence happens via session_manager.add_message()
-        // inside the helper, and this conversation is about to be dropped.
-        let mut compacted_conversation = compacted_conversation;
-        self.run_post_compact_hook(
-            &hooks,
-            session_id,
-            pre_compact_len,
-            post_compact_len,
-            true,
+        // Fire PostCompact hook
+        hooks.emit(
+            HookEvent::PostCompact {
+                session_id: session_id.to_string(),
+                before_count: pre_compact_len,
+                after_count: compacted_conversation.messages().len(),
+                manual: true,
+                cwd: session.working_dir.clone(),
+            },
             &session.working_dir,
-            &manager,
-            &mut compacted_conversation,
             CancellationToken::new(),
-        )
-        .await?;
+        ).await;
 
         Ok(Some(Message::assistant().with_system_notification(
             SystemNotificationType::InlineMessage,

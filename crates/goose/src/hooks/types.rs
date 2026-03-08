@@ -1,301 +1,228 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-pub enum HookEventKind {
-    #[default]
-    SessionStart,
-    PreToolUse,
-    PostToolUse,
-    PostToolUseFailure,
-    UserPromptSubmit,
-    Stop,
-    SubagentStop,
-    SubagentStart,
-    SessionEnd,
-    PreCompact,
-    PostCompact,
-    Notification,
-    PermissionRequest,
-    TeammateIdle,
-    TaskCompleted,
-    ConfigChange,
-}
-
-impl HookEventKind {
-    pub fn can_block(&self) -> bool {
-        matches!(
-            self,
-            Self::PreToolUse
-                | Self::PermissionRequest
-                | Self::UserPromptSubmit
-                | Self::Stop
-                | Self::SubagentStop
-                | Self::TeammateIdle
-                | Self::TaskCompleted
-                | Self::ConfigChange
-        )
-    }
-}
-
-impl std::str::FromStr for HookEventKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_value(serde_json::Value::String(s.to_string()))
-            .map_err(|e| format!("unknown hook event '{}': {}", s, e))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub struct HookInvocation {
-    #[serde(rename = "hook_event_name")]
-    pub event: HookEventKind,
-    pub session_id: String,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_input: Option<Value>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_output: Option<Value>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_error: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_prompt: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notification_type: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_count_before: Option<usize>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_count_after: Option<usize>,
-
-    #[serde(default)]
-    pub manual_compact: bool,
-}
-
-impl HookInvocation {
-    fn base(event: HookEventKind, session_id: String) -> Self {
-        Self {
-            event,
-            session_id,
-            ..Default::default()
-        }
-    }
-
-    pub fn pre_tool_use(
+/// Lifecycle events emitted by the agent. This is the ONLY type
+/// that crosses the hooks/agent boundary. Zero rmcp imports.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "hook_event_name", rename_all = "PascalCase")]
+pub enum HookEvent {
+    SessionStart {
+        session_id: String,
+        cwd: PathBuf,
+    },
+    UserPromptSubmit {
+        session_id: String,
+        user_prompt: String,
+        cwd: PathBuf,
+    },
+    PreToolUse {
         session_id: String,
         tool_name: String,
         tool_input: Value,
-        cwd: String,
-    ) -> Self {
-        Self {
-            tool_name: Some(tool_name),
-            tool_input: Some(tool_input),
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::PreToolUse, session_id)
-        }
-    }
-
-    pub fn post_tool_use(
+        cwd: PathBuf,
+    },
+    PostToolUse {
         session_id: String,
         tool_name: String,
         tool_input: Value,
-        tool_output: Value,
-        cwd: String,
-    ) -> Self {
-        Self {
-            tool_name: Some(tool_name),
-            tool_input: Some(tool_input),
-            tool_output: Some(tool_output),
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::PostToolUse, session_id)
-        }
-    }
-
-    pub fn post_tool_use_failure(
+        tool_output: String,
+        cwd: PathBuf,
+    },
+    PostToolUseFailure {
         session_id: String,
         tool_name: String,
         tool_input: Value,
         tool_error: String,
-        cwd: String,
-    ) -> Self {
-        Self {
-            tool_name: Some(tool_name),
-            tool_input: Some(tool_input),
-            tool_error: Some(tool_error),
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::PostToolUseFailure, session_id)
-        }
-    }
-
-    pub fn user_prompt_submit(session_id: String, user_prompt: String, cwd: String) -> Self {
-        Self {
-            user_prompt: Some(user_prompt),
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::UserPromptSubmit, session_id)
-        }
-    }
-
-    pub fn session_start(session_id: String, cwd: String) -> Self {
-        Self {
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::SessionStart, session_id)
-        }
-    }
-
-    pub fn session_end(session_id: String, reason: Option<String>) -> Self {
-        Self {
-            reason,
-            ..Self::base(HookEventKind::SessionEnd, session_id)
-        }
-    }
-
-    pub fn stop(session_id: String, reason: Option<String>, cwd: String) -> Self {
-        Self {
-            reason,
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::Stop, session_id)
-        }
-    }
-
-    pub fn subagent_start(session_id: String, cwd: String) -> Self {
-        Self {
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::SubagentStart, session_id)
-        }
-    }
-
-    pub fn subagent_stop(session_id: String, reason: Option<String>) -> Self {
-        Self {
-            reason,
-            ..Self::base(HookEventKind::SubagentStop, session_id)
-        }
-    }
-
-    pub fn pre_compact(
+        cwd: PathBuf,
+    },
+    PreCompact {
         session_id: String,
-        message_count_before: usize,
+        message_count: usize,
         manual: bool,
-        cwd: String,
-    ) -> Self {
-        Self {
-            message_count_before: Some(message_count_before),
-            manual_compact: manual,
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::PreCompact, session_id)
-        }
-    }
-
-    pub fn post_compact(
+        cwd: PathBuf,
+    },
+    PostCompact {
         session_id: String,
-        message_count_before: usize,
-        message_count_after: usize,
+        before_count: usize,
+        after_count: usize,
         manual: bool,
-        cwd: String,
-    ) -> Self {
-        Self {
-            message_count_before: Some(message_count_before),
-            message_count_after: Some(message_count_after),
-            manual_compact: manual,
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::PostCompact, session_id)
-        }
-    }
-
-    pub fn permission_request(
+        cwd: PathBuf,
+    },
+    Stop {
         session_id: String,
-        tool_name: String,
-        tool_input: Value,
-        cwd: String,
-    ) -> Self {
-        Self {
-            tool_name: Some(tool_name),
-            tool_input: Some(tool_input),
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::PermissionRequest, session_id)
+        cwd: PathBuf,
+    },
+}
+
+impl HookEvent {
+    /// Returns the event kind string matching config keys.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SessionStart { .. } => "SessionStart",
+            Self::UserPromptSubmit { .. } => "UserPromptSubmit",
+            Self::PreToolUse { .. } => "PreToolUse",
+            Self::PostToolUse { .. } => "PostToolUse",
+            Self::PostToolUseFailure { .. } => "PostToolUseFailure",
+            Self::PreCompact { .. } => "PreCompact",
+            Self::PostCompact { .. } => "PostCompact",
+            Self::Stop { .. } => "Stop",
         }
     }
 
-    pub fn notification(session_id: String, notification_type: String, cwd: String) -> Self {
-        Self {
-            notification_type: Some(notification_type),
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::Notification, session_id)
+    /// Whether this event type supports blocking (exit 2).
+    pub fn is_blockable(&self) -> bool {
+        matches!(
+            self,
+            Self::UserPromptSubmit { .. } | Self::PreToolUse { .. } | Self::PreCompact { .. } | Self::Stop { .. }
+        )
+    }
+
+    /// Returns the tool_name for tool-related events.
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::PreToolUse { tool_name, .. }
+            | Self::PostToolUse { tool_name, .. }
+            | Self::PostToolUseFailure { tool_name, .. } => Some(tool_name),
+            _ => None,
         }
     }
 
-    pub fn teammate_idle(session_id: String, cwd: String) -> Self {
-        Self {
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::TeammateIdle, session_id)
+    /// Returns the tool_input for tool-related events.
+    pub fn tool_input(&self) -> Option<&Value> {
+        match self {
+            Self::PreToolUse { tool_input, .. }
+            | Self::PostToolUse { tool_input, .. }
+            | Self::PostToolUseFailure { tool_input, .. } => Some(tool_input),
+            _ => None,
         }
     }
 
-    pub fn task_completed(session_id: String, cwd: String) -> Self {
-        Self {
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::TaskCompleted, session_id)
-        }
-    }
-
-    pub fn config_change(session_id: String, cwd: String) -> Self {
-        Self {
-            cwd: Some(cwd),
-            ..Self::base(HookEventKind::ConfigChange, session_id)
+    /// Returns manual flag for compact events.
+    pub fn is_manual_compact(&self) -> bool {
+        match self {
+            Self::PreCompact { manual, .. } | Self::PostCompact { manual, .. } => *manual,
+            _ => false,
         }
     }
 }
 
+/// Result of running all hooks for an event.
+#[derive(Debug, Default)]
+pub struct HookOutcome {
+    /// true if ANY hook returned Block (exit code 2).
+    pub blocked: bool,
+    /// Concatenated additional_context from all hooks.
+    pub context: Option<String>,
+}
+
+/// Deserialized from hook stdout JSON.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HookResult {
+pub(crate) struct HookResult {
     #[serde(default)]
     pub decision: Option<HookDecision>,
 
     #[serde(default)]
+    #[allow(dead_code)]
     pub reason: Option<String>,
 
-    #[serde(default)]
-    pub hook_specific_output: Option<Value>,
-
-    #[serde(default, rename = "continue")]
-    pub continue_: Option<bool>,
-
-    #[serde(default)]
-    pub stop_reason: Option<String>,
-
-    #[serde(default)]
+    #[serde(default, alias = "additionalContext")]
     pub additional_context: Option<String>,
-
-    #[serde(default)]
-    pub system_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum HookDecision {
+pub(crate) enum HookDecision {
     Allow,
     Block,
 }
 
-#[derive(Debug, Default)]
-pub struct HooksOutcome {
-    pub blocked: bool,
-    pub context: Option<String>,
+/// Raw output from a hook subprocess.
+#[derive(Debug)]
+pub(crate) struct HookCommandOutput {
+    pub stdout: String,
+    #[allow(dead_code)]
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_event_kind_matches_config_keys() {
+        let event = HookEvent::SessionStart {
+            session_id: "s1".into(),
+            cwd: "/tmp".into(),
+        };
+        assert_eq!(event.kind(), "SessionStart");
+        assert!(!event.is_blockable());
+    }
+
+    #[test]
+    fn blockable_events() {
+        let event = HookEvent::PreToolUse {
+            session_id: "s1".into(),
+            tool_name: "test".into(),
+            tool_input: Value::Null,
+            cwd: "/tmp".into(),
+        };
+        assert!(event.is_blockable());
+        assert_eq!(event.tool_name(), Some("test"));
+    }
+
+    #[test]
+    fn hook_event_serializes_with_tag() {
+        let event = HookEvent::PreToolUse {
+            session_id: "s1".into(),
+            tool_name: "developer__shell".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            cwd: "/tmp".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["hook_event_name"], "PreToolUse");
+        assert_eq!(json["session_id"], "s1");
+        assert_eq!(json["tool_name"], "developer__shell");
+    }
+
+    #[test]
+    fn hook_event_fields_are_snake_case() {
+        // Contrib hooks parse stdin JSON with jq using snake_case field names.
+        // This test guards against serde rename_all accidentally changing them.
+        let event = HookEvent::PostToolUse {
+            session_id: "s1".into(),
+            tool_name: "developer__shell".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            tool_output: "files".into(),
+            cwd: "/tmp".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(obj.contains_key("session_id"), "expected snake_case session_id");
+        assert!(obj.contains_key("tool_name"), "expected snake_case tool_name");
+        assert!(obj.contains_key("tool_input"), "expected snake_case tool_input");
+        assert!(obj.contains_key("tool_output"), "expected snake_case tool_output");
+        assert!(obj.contains_key("cwd"), "expected lowercase cwd");
+        assert!(!obj.contains_key("SessionId"), "PascalCase field names would break contrib hooks");
+    }
+
+    #[test]
+    fn hook_result_accepts_camel_case_context() {
+        // Contrib hooks emit "additionalContext" (camelCase, Claude Code convention).
+        // The serde alias must accept both forms.
+        let json = r#"{"additionalContext": "from camelCase"}"#;
+        let result: HookResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.additional_context.as_deref(), Some("from camelCase"));
+    }
+
+    #[test]
+    fn hook_result_deserializes_from_json() {
+        let json = r#"{"decision": "block", "reason": "not allowed", "additional_context": "ctx"}"#;
+        let result: HookResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.decision, Some(HookDecision::Block));
+        assert_eq!(result.reason.as_deref(), Some("not allowed"));
+        assert_eq!(result.additional_context.as_deref(), Some("ctx"));
+    }
 }

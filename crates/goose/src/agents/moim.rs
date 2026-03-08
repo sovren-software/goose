@@ -28,7 +28,7 @@ pub async fn inject_moim(
             .iter()
             .rposition(|m| m.role == Role::Assistant)
             .unwrap_or(0);
-        messages.insert(idx, Message::user().with_text(moim));
+        messages.insert(idx, Message::user().with_text(moim).with_visibility(false, true));
 
         let (fixed, issues) = fix_conversation(Conversation::new_unvalidated(messages));
 

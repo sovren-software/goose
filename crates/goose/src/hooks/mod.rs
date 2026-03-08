@@ -1,281 +1,213 @@
 mod config;
+mod subprocess;
 pub mod types;
 
-pub use config::{HookAction, HookEventConfig, HookSettingsFile};
-pub use types::{HookDecision, HookEventKind, HookInvocation, HookResult, HooksOutcome};
+pub use types::{HookEvent, HookOutcome};
 
-use anyhow::Result;
-use rmcp::model::{CallToolRequestParams, CallToolResult};
+use config::{HookAction, HooksConfig};
 use std::path::Path;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use types::{HookDecision, HookResult};
 
-pub struct Hooks {
-    settings: HookSettingsFile,
+const MAX_CONTEXT_LEN: usize = 32_768;
+
+/// Stable hook execution runtime. Routes lifecycle events to
+/// user-configured shell scripts via direct subprocess execution.
+/// Zero rmcp imports — decoupled from agent internals.
+pub struct HookRuntime {
+    config: HooksConfig,
 }
 
-impl Hooks {
+impl HookRuntime {
+    /// Load hook configuration. Returns a no-op runtime if config is absent.
     pub fn load(working_dir: &Path) -> Self {
-        let settings = HookSettingsFile::load_merged(working_dir).unwrap_or_else(|e| {
+        let config = HooksConfig::load_merged(working_dir).unwrap_or_else(|e| {
             tracing::debug!("No hooks config loaded: {}", e);
-            HookSettingsFile::default()
+            HooksConfig::default()
         });
-        Self { settings }
+        Self { config }
     }
 
-    pub async fn run(
+    /// Emit a lifecycle event. Runs all matching hooks, returns aggregated outcome.
+    pub async fn emit(
         &self,
-        invocation: HookInvocation,
-        extension_manager: &crate::agents::extension_manager::ExtensionManager,
+        event: HookEvent,
         working_dir: &Path,
         cancel_token: CancellationToken,
-    ) -> Result<HooksOutcome> {
-        let event_configs = self.settings.get_hooks_for_event(invocation.event);
+    ) -> HookOutcome {
+        let event_configs = self.config.get_hooks_for_event(event.kind());
+        if event_configs.is_empty() {
+            tracing::info!("No hooks configured for event {}", event.kind());
+            return HookOutcome::default();
+        }
+        tracing::info!(
+            "Running {} hook group(s) for event {}",
+            event_configs.len(),
+            event.kind()
+        );
 
-        let mut outcome = HooksOutcome::default();
+        let stdin_json = match serde_json::to_string(&event) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("Failed to serialize hook event: {}", e);
+                return HookOutcome::default();
+            }
+        };
+
+        let mut outcome = HookOutcome::default();
         let mut contexts = Vec::new();
 
-        for config in event_configs {
-            if !Self::matches_config(config, &invocation) {
+        for event_config in event_configs {
+            if !Self::matches_config(event_config, &event) {
                 continue;
             }
 
-            for action in &config.hooks {
-                match Self::execute_action(
-                    action,
-                    &invocation,
-                    extension_manager,
-                    working_dir,
-                    cancel_token.clone(),
-                )
-                .await
-                {
-                    Ok(Some(result)) => {
-                        if let Some(HookDecision::Block) = result.decision {
-                            if invocation.event.can_block() {
-                                outcome.blocked = true;
-                                tracing::info!("Hook blocked event {:?}", invocation.event);
-                                return Ok(outcome);
-                            }
-                            tracing::warn!(
-                                "Hook returned Block for non-blockable event {:?}, ignoring",
-                                invocation.event
-                            );
-                        }
+            for action in &event_config.hooks {
+                match action {
+                    HookAction::Command { command, timeout } => {
+                        let result = subprocess::run_hook_command(
+                            command,
+                            Some(&stdin_json),
+                            *timeout,
+                            working_dir,
+                            cancel_token.clone(),
+                        )
+                        .await;
 
-                        if let Some(context) = result.additional_context {
-                            contexts.push(context);
+                        match result {
+                            Ok(output) => {
+                                tracing::info!(
+                                    "Hook for {} exited {:?}, stdout {} bytes",
+                                    event.kind(),
+                                    output.exit_code,
+                                    output.stdout.len()
+                                );
+                                if output.timed_out {
+                                    tracing::warn!(
+                                        "Hook timed out after {}s, failing open",
+                                        timeout
+                                    );
+                                    continue;
+                                }
+
+                                match output.exit_code {
+                                    Some(0) => {
+                                        // Parse JSON result or treat as context
+                                        if let Some(hook_result) =
+                                            Self::parse_stdout(&output.stdout, event.is_blockable())
+                                        {
+                                            // Honor JSON decision:"block" at exit 0 (Claude Code compat)
+                                            if hook_result.decision == Some(HookDecision::Block)
+                                                && event.is_blockable()
+                                            {
+                                                outcome.blocked = true;
+                                                tracing::info!(
+                                                    "Hook blocked event {} (JSON decision)",
+                                                    event.kind()
+                                                );
+                                                return outcome;
+                                            }
+                                            if let Some(ctx) = hook_result.additional_context {
+                                                contexts.push(ctx);
+                                            }
+                                        }
+                                    }
+                                    Some(2) if event.is_blockable() => {
+                                        outcome.blocked = true;
+                                        tracing::info!(
+                                            "Hook blocked event {} (exit 2)",
+                                            event.kind()
+                                        );
+                                        return outcome;
+                                    }
+                                    Some(code) => {
+                                        tracing::debug!(
+                                            "Hook exited with code {}, failing open",
+                                            code
+                                        );
+                                    }
+                                    None => {
+                                        tracing::debug!("Hook killed (no exit code), failing open");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Hook execution failed: {}, failing open", e);
+                            }
                         }
-                    }
-                    Ok(None) => {
-                        tracing::debug!("Hook returned no result, continuing");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Hook execution failed: {}, continuing", e);
                     }
                 }
             }
         }
 
         if !contexts.is_empty() {
-            outcome.context = Some(contexts.join("\n"));
-        }
-
-        Ok(outcome)
-    }
-
-    // Dispatches hook actions directly via ExtensionManager, bypassing tool inspection
-    // and approval prompts. This is intentional: hooks are a privileged execution path
-    // configured by the user (global) or opted-in (project). Running hooks through the
-    // normal tool pipeline would cause infinite recursion (PreToolUse → hook → tool → PreToolUse).
-    async fn execute_action(
-        action: &HookAction,
-        invocation: &HookInvocation,
-        extension_manager: &crate::agents::extension_manager::ExtensionManager,
-        working_dir: &Path,
-        cancel_token: CancellationToken,
-    ) -> Result<Option<HookResult>> {
-        let (tool_call, timeout_secs) = Self::build_tool_call(action, invocation)?;
-
-        let tool_call_result = extension_manager
-            .dispatch_tool_call(
-                &invocation.session_id,
-                tool_call,
-                Some(working_dir),
-                cancel_token.clone(),
-            )
-            .await?;
-
-        tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(timeout_secs), tool_call_result.result) => {
-                match result {
-                    Ok(Ok(call_result)) => Self::parse_result(call_result, action, invocation.event),
-                    Ok(Err(e)) => {
-                        tracing::warn!("Hook tool call failed: {}, failing open", e);
-                        Ok(None)
-                    }
-                    Err(_) => {
-                        tracing::warn!("Hook timed out after {}s, failing open", timeout_secs);
-                        Ok(None)
-                    }
-                }
-            }
-            _ = cancel_token.cancelled() => {
-                tracing::info!("Hook cancelled by session cancellation");
-                Ok(None)
-            }
-        }
-    }
-
-    fn build_tool_call(
-        action: &HookAction,
-        invocation: &HookInvocation,
-    ) -> Result<(CallToolRequestParams, u64)> {
-        match action {
-            HookAction::Command { command, timeout } => {
-                let json = serde_json::to_string(invocation)?;
-                let escaped = json.replace('\'', "'\\''");
-                let shell_cmd = format!(
-                    "printf '%s' '{}' | {}; printf '\\nGOOSE_HOOK_EXIT:%d' $?",
-                    escaped, command
+            tracing::info!(
+                "Hook {} produced {} context chunk(s), total {} bytes",
+                event.kind(),
+                contexts.len(),
+                contexts.iter().map(|c| c.len()).sum::<usize>()
+            );
+            let mut joined = contexts.join("\n");
+            if joined.len() > MAX_CONTEXT_LEN {
+                tracing::warn!(
+                    "Hook context truncated from {} to {}",
+                    joined.len(),
+                    MAX_CONTEXT_LEN
                 );
-
-                let args = serde_json::json!({"command": shell_cmd});
-                let mut params = CallToolRequestParams::new("developer__shell");
-                params.arguments = args.as_object().cloned();
-                Ok((params, *timeout))
+                joined.truncate(joined.floor_char_boundary(MAX_CONTEXT_LEN));
             }
-            HookAction::McpTool {
-                tool,
-                arguments,
-                timeout,
-            } => {
-                let mut params = CallToolRequestParams::new(tool.clone());
-                params.arguments = Some(arguments.clone());
-                Ok((params, *timeout))
-            }
+            outcome.context = Some(joined);
         }
+
+        outcome
     }
 
-    fn parse_result(
-        result: CallToolResult,
-        action: &HookAction,
-        event: HookEventKind,
-    ) -> Result<Option<HookResult>> {
-        if result.is_error.unwrap_or(false) {
-            tracing::warn!("Hook tool returned error, failing open");
-            return Ok(None);
+    /// Parse stdout from a hook that exited 0.
+    fn parse_stdout(stdout: &str, is_blockable: bool) -> Option<HookResult> {
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Some(HookResult::default());
         }
 
-        let text = result
-            .content
-            .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
-            .collect::<Vec<_>>()
-            .join("");
-
-        match action {
-            HookAction::Command { .. } => {
-                if text.is_empty() {
-                    return Ok(Some(HookResult::default()));
-                }
-
-                if let Some(exit_marker) = text.rfind("GOOSE_HOOK_EXIT:") {
-                    let (output, exit_part) = text.split_at(exit_marker);
-                    if let Some(code_str) = exit_part.strip_prefix("GOOSE_HOOK_EXIT:") {
-                        if let Ok(code) = code_str
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("")
-                            .parse::<i32>()
-                        {
-                            return match code {
-                                0 => {
-                                    if output.trim().is_empty() {
-                                        Ok(Some(HookResult::default()))
-                                    } else {
-                                        Ok(serde_json::from_str(output.trim())
-                                            .map(Some)
-                                            .unwrap_or_else(|_| {
-                                                // Non-JSON stdout from exit-0 command → surface as context (Claude Code compat)
-                                                let mut context = output.trim().to_string();
-                                                if context.len() > 32_768 {
-                                                    tracing::warn!(
-                                                        "Hook stdout truncated from {} to 32KB",
-                                                        context.len()
-                                                    );
-                                                    context.truncate(
-                                                        context.floor_char_boundary(32_768),
-                                                    );
-                                                }
-                                                Some(HookResult {
-                                                    additional_context: Some(context),
-                                                    ..Default::default()
-                                                })
-                                            }))
-                                    }
-                                }
-                                2 if event.can_block() => Ok(Some(HookResult {
-                                    decision: Some(HookDecision::Block),
-                                    ..Default::default()
-                                })),
-                                _ => Ok(None),
-                            };
-                        }
-                    }
-                }
-
-                // No exit marker — can't confirm exit 0, so don't surface raw output
-                Ok(serde_json::from_str(text.trim())
-                    .map(Some)
-                    .unwrap_or_else(|e| {
-                        tracing::debug!("Hook output is not JSON (no exit marker): {}", e);
-                        None
-                    }))
+        // Try JSON parse first
+        if let Ok(result) = serde_json::from_str::<HookResult>(trimmed) {
+            // Check for block decision in JSON
+            if result.decision == Some(HookDecision::Block) && is_blockable {
+                // This shouldn't happen for exit-0 (block should use exit 2),
+                // but handle it for compatibility
+                return Some(result);
             }
-            HookAction::McpTool { .. } => {
-                if text.trim().is_empty() {
-                    Ok(Some(HookResult::default()))
-                } else {
-                    Ok(Some(serde_json::from_str(text.trim()).unwrap_or_else(
-                        |e| {
-                            tracing::debug!("MCP hook output is not HookResult JSON: {}", e);
-                            let mut context = text.trim().to_string();
-                            if context.len() > 32_768 {
-                                tracing::warn!(
-                                    "MCP hook output truncated from {} to 32KB",
-                                    context.len()
-                                );
-                                context.truncate(context.floor_char_boundary(32_768));
-                            }
-                            HookResult {
-                                additional_context: Some(context),
-                                ..Default::default()
-                            }
-                        },
-                    )))
-                }
-            }
+            return Some(result);
         }
+
+        // Non-JSON stdout from exit-0 → surface as context
+        let mut context = trimmed.to_string();
+        if context.len() > MAX_CONTEXT_LEN {
+            tracing::warn!(
+                "Hook stdout truncated from {} to {}",
+                context.len(),
+                MAX_CONTEXT_LEN
+            );
+            context.truncate(context.floor_char_boundary(MAX_CONTEXT_LEN));
+        }
+        Some(HookResult {
+            additional_context: Some(context),
+            ..Default::default()
+        })
     }
 
-    fn matches_config(config: &HookEventConfig, invocation: &HookInvocation) -> bool {
+    fn matches_config(config: &config::HookEventConfig, event: &HookEvent) -> bool {
         let Some(pattern) = &config.matcher else {
             return true;
         };
 
-        use HookEventKind::*;
-        match invocation.event {
-            PreToolUse | PostToolUse | PostToolUseFailure | PermissionRequest => {
-                Self::matches_tool(pattern, invocation)
-            }
-            Notification => invocation
-                .notification_type
-                .as_ref()
-                .is_some_and(|t| t.contains(pattern)),
-            PreCompact | PostCompact => {
-                (invocation.manual_compact && pattern == "manual")
-                    || (!invocation.manual_compact && pattern == "auto")
+        match event {
+            HookEvent::PreToolUse { .. }
+            | HookEvent::PostToolUse { .. }
+            | HookEvent::PostToolUseFailure { .. } => Self::matches_tool(pattern, event),
+            HookEvent::PreCompact { .. } | HookEvent::PostCompact { .. } => {
+                (event.is_manual_compact() && pattern == "manual")
+                    || (!event.is_manual_compact() && pattern == "auto")
             }
             _ => true,
         }
@@ -283,38 +215,38 @@ impl Hooks {
 
     /// Match a tool invocation against a Claude Code-style matcher pattern.
     /// Supports:
-    ///   "Bash" or "Bash(...)" — maps to developer__shell, optionally matching command content
-    ///   "tool_name" — direct tool name match (goose-native)
-    fn matches_tool(pattern: &str, invocation: &HookInvocation) -> bool {
-        let tool_name = match &invocation.tool_name {
+    ///   "Bash" or "Bash(...)" — maps to shell / developer__shell
+    ///   "tool_name" — direct tool name match
+    fn matches_tool(pattern: &str, event: &HookEvent) -> bool {
+        let tool_name = match event.tool_name() {
             Some(name) => name,
             None => return false,
         };
 
-        // Claude Code "Bash" / "Bash(pattern)" syntax
+        let is_shell = tool_name == "shell" || tool_name == "developer__shell";
+
+        // Claude Code "Bash" syntax
         if pattern == "Bash" {
-            return tool_name == "developer__shell";
+            return is_shell;
         }
 
+        // Claude Code "Bash(pattern)" syntax
         if let Some(inner) = pattern
             .strip_prefix("Bash(")
             .and_then(|s| s.strip_suffix(')'))
         {
-            if tool_name != "developer__shell" {
+            if !is_shell {
                 return false;
             }
-            // Match the inner pattern against the command argument
-            let command_str = invocation
-                .tool_input
-                .as_ref()
+            let command_str = event
+                .tool_input()
                 .and_then(|v| v.get("command"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-
             return Self::glob_match(inner, command_str);
         }
 
-        // Direct tool name match (goose-native: "developer__shell", "slack__post_message", etc.)
+        // Direct tool name match
         tool_name == pattern
     }
 
@@ -322,5 +254,139 @@ impl Hooks {
         glob::Pattern::new(pattern)
             .map(|p| p.matches(text))
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn matches_tool_bash_shorthand() {
+        let event = HookEvent::PreToolUse {
+            session_id: "s1".into(),
+            tool_name: "developer__shell".into(),
+            tool_input: json!({"command": "ls -la"}),
+            cwd: "/tmp".into(),
+        };
+        assert!(HookRuntime::matches_tool("Bash", &event));
+        assert!(HookRuntime::matches_tool("Bash(ls*)", &event));
+        assert!(!HookRuntime::matches_tool("Bash(rm*)", &event));
+    }
+
+    #[test]
+    fn matches_tool_shell_platform_name() {
+        // Platform extensions register as "shell" (not "developer__shell").
+        // Both forms must match Bash shorthand and Bash(glob) patterns.
+        let event = HookEvent::PreToolUse {
+            session_id: "s1".into(),
+            tool_name: "shell".into(),
+            tool_input: json!({"command": "cargo build"}),
+            cwd: "/tmp".into(),
+        };
+        assert!(HookRuntime::matches_tool("Bash", &event));
+        assert!(HookRuntime::matches_tool("Bash(cargo*)", &event));
+        assert!(!HookRuntime::matches_tool("Bash(rm*)", &event));
+        assert!(HookRuntime::matches_tool("shell", &event));
+    }
+
+    #[test]
+    fn matches_tool_direct_name() {
+        let event = HookEvent::PreToolUse {
+            session_id: "s1".into(),
+            tool_name: "slack__post_message".into(),
+            tool_input: json!({}),
+            cwd: "/tmp".into(),
+        };
+        assert!(HookRuntime::matches_tool("slack__post_message", &event));
+        assert!(!HookRuntime::matches_tool("Bash", &event));
+    }
+
+    #[test]
+    fn parse_stdout_json() {
+        let result =
+            HookRuntime::parse_stdout(r#"{"additional_context": "injected"}"#, false).unwrap();
+        assert_eq!(result.additional_context.as_deref(), Some("injected"));
+    }
+
+    #[test]
+    fn parse_stdout_plain_text() {
+        let result = HookRuntime::parse_stdout("plain context text", false).unwrap();
+        assert_eq!(
+            result.additional_context.as_deref(),
+            Some("plain context text")
+        );
+    }
+
+    #[test]
+    fn parse_stdout_empty() {
+        let result = HookRuntime::parse_stdout("", false).unwrap();
+        assert!(result.additional_context.is_none());
+    }
+
+    #[test]
+    fn parse_stdout_block_decision_at_exit_0() {
+        // A hook that exits 0 but returns decision:block — Claude Code compat.
+        // emit() checks this field and sets outcome.blocked for blockable events.
+        let result = HookRuntime::parse_stdout(
+            r#"{"decision": "block", "reason": "no"}"#,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.decision, Some(HookDecision::Block));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn emit_honors_json_block_at_exit_0() {
+        // Integration test: a hook that exits 0 with {"decision":"block"}
+        // must set outcome.blocked = true. This was a dead code path before
+        // the fix — parse_stdout returned the decision but emit() ignored it.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write a hook script that exits 0 with block decision
+        let hook_script = dir.path().join("block-hook.sh");
+        let mut f = std::fs::File::create(&hook_script).unwrap();
+        writeln!(f, "#!/bin/bash").unwrap();
+        writeln!(f, r#"echo '{{"decision":"block","reason":"test"}}'"#).unwrap();
+        writeln!(f, "exit 0").unwrap();
+        drop(f);
+        std::fs::set_permissions(
+            &hook_script,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        // Write a hooks.json that wires this script to UserPromptSubmit
+        let config_path = dir.path().join("hooks.json");
+        let config = serde_json::json!({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": hook_script.to_str().unwrap(),
+                        "timeout": 5
+                    }]
+                }]
+            }
+        });
+        std::fs::write(&config_path, config.to_string()).unwrap();
+
+        let runtime = HookRuntime {
+            config: serde_json::from_str(&config.to_string()).unwrap(),
+        };
+
+        let event = HookEvent::UserPromptSubmit {
+            session_id: "test".into(),
+            user_prompt: "hello".into(),
+            cwd: dir.path().to_path_buf(),
+        };
+
+        let outcome = runtime
+            .emit(event, dir.path(), CancellationToken::new())
+            .await;
+        assert!(outcome.blocked, "exit-0 JSON block decision must set outcome.blocked");
     }
 }

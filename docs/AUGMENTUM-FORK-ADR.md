@@ -158,28 +158,35 @@ cp contrib/config/hooks.json ~/.config/goose/hooks.json
 
 ---
 
-## Hook Protocol Reference (Upstream)
+## Hook Protocol Reference
 
-Input field names for `developer__shell`-routed hooks:
+Input fields (stdin JSON). All field names are snake_case.
 
 | Field | Description | Events |
 |-------|-------------|--------|
 | `hook_event_name` | PascalCase event type | All |
 | `session_id` | Session UUID | All |
-| `cwd` | Working directory | All |
+| `cwd` | Working directory path (string) | All |
 | `user_prompt` | User's message text | UserPromptSubmit |
-| `tool_name` | Tool being called | PreToolUse, PostToolUse |
-| `tool_input` | Tool arguments (JSON object) | PreToolUse, PostToolUse |
-| `tool_output` | Tool result | PostToolUse |
+| `tool_name` | Tool being called | PreToolUse, PostToolUse, PostToolUseFailure |
+| `tool_input` | Tool arguments (JSON object) | PreToolUse, PostToolUse, PostToolUseFailure |
+| `tool_output` | Tool result (string) | PostToolUse |
 | `tool_error` | Error message | PostToolUseFailure |
+| `message_count` | Messages before compact | PreCompact |
+| `before_count` | Messages before compact | PostCompact |
+| `after_count` | Messages after compact | PostCompact |
+| `manual` | Whether compact was user-triggered | PreCompact, PostCompact |
 
-Output:
+Output (stdout JSON, all lowercase):
 
 | Field | Description |
 |-------|-------------|
-| `additionalContext` | Text injected as invisible user message |
-| `decision` | `"Block"` or `"Allow"` (blockable events) |
-| exit code 2 | Block (alternative to JSON decision) |
+| `additional_context` | Text injected as invisible user message |
+| `decision` | `"block"` or `"allow"` (blockable events only) |
+| `reason` | Optional string, logged but not injected |
+| exit code 2 | Block (canonical mechanism; preferred over JSON decision) |
+
+See `docs/hooks.md` for complete event reference and output protocol.
 
 ---
 
@@ -293,18 +300,59 @@ Dynamic model selection per turn: fast model for simple responses, reasoning mod
 
 ```bash
 # Sync upstream main changes
-git fetch origin
-git merge origin/main --no-edit
-git push sovren main
-
-# Monitor upstream hooks PR
-# https://github.com/block/goose/pull/7411 (hooks/claude-code-compatible)
-# Watch for merges to origin/main — already adopted, no further action needed
+git fetch upstream
+git merge upstream/main --no-edit
+git push origin main   # origin = sovren-software/goose
 ```
 
 Upstream branches to watch:
-- `origin/main` — merge periodically (monthly or when significant features land)
-- `origin/hooks/claude-code-compatible` — already merged (Phase 4). Monitor for follow-up commits.
+- `upstream/main` — merge periodically (monthly or when significant features land)
+- `upstream/hooks/claude-code-compatible` — our hook system was re-architected independently (Decision 5); this branch is no longer relevant
+
+---
+
+## Decision 5: HookRuntime Re-Architecture — Direct Subprocess Execution (2026-03-07)
+
+**Decision:** Replace the MCP-routed hook executor (Decision 2) with a `HookRuntime` that
+executes hooks as direct subprocesses. Decouple hooks from `rmcp` types and `ExtensionManager`.
+
+**Motivating problem:** Upstream merged rmcp 0.16 -> 1.1.0, restructured agent.rs (SmartApprove,
+PermissionInspector, extension consolidation), and moved to builder-pattern APIs. Our hooks code
+constructed `CallToolRequestParams` struct literals and routed through `ExtensionManager.dispatch_tool_call()`,
+creating merge conflicts at every upstream sync. 106 commits behind with 3 breaking changes.
+
+**Architecture:**
+
+| Aspect | Old (Decision 2) | New (Decision 5) |
+|--------|------------------|------------------|
+| Execution | Via `developer__shell` MCP tool | Direct `tokio::process::Command` subprocess |
+| rmcp coupling | `CallToolRequestParams` struct literals | Zero rmcp imports in hooks module |
+| Agent coupling | `ExtensionManager` reference required | Only `CancellationToken` |
+| Action types | Command + McpTool | Command only |
+| Agent surface | ~380 lines across 3 files | ~43 lines across 3 files |
+| Interface | `Hooks::run(invocation, ext_mgr, ...)` | `HookRuntime::emit(event, working_dir, cancel)` |
+
+**Key design decisions:**
+1. **Drop McpTool action type** — all hooks execute as direct subprocesses. MCP routing was the
+   primary source of coupling. Can be re-added inside HookRuntime without changing the emit() API.
+2. **8 event types** — SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure,
+   PreCompact, PostCompact, Stop. Additional events are enum variants, not interface changes.
+3. **HookEvent is the stable contract** — the only type that crosses the hooks/agent boundary.
+   Serializable to the same JSON format contrib hooks expect.
+4. **Config format unchanged** — same hooks.json, same matcher syntax. Zero contrib hook changes.
+
+**Expected benefits:**
+- Upstream merges require zero hook-related conflict resolution
+- 89% reduction in agent wiring code (380 -> 43 lines)
+- No dependency on `developer__shell` extension being loaded
+- Subprocess isolation (own process group) prevents terminal SIGINT from killing hooks
+- Deadlock-safe stdin/stdout handling (drain tasks spawned before stdin write)
+
+**Trade-offs:**
+- Lost McpTool action type. No current hooks use it; can be re-added if needed.
+- Direct subprocess means hooks run in a different environment than MCP tools (no MCP
+  transport, no extension context). For shell scripts this is identical; for hypothetical
+  MCP-native hooks it would differ.
 
 ---
 

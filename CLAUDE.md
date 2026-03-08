@@ -1,17 +1,17 @@
 # Augmentum Agent (Goose Fork)
 
 Sovren Software's fork of [block/goose](https://github.com/block/goose).
-Upstream remote: `origin` → `https://github.com/block/goose.git`
-Sovren remote: `sovren` → `https://github.com/sovren-software/goose.git`
+Upstream remote: `upstream` → `git@github.com:block/goose.git`
+Sovren remote: `origin` → `git@github.com:sovren-software/goose.git`
 
 ---
 
 ## What This Fork Adds
 
-### Lifecycle Hooks (upstream `hooks/claude-code-compatible` branch, merged)
+### Lifecycle Hooks (re-architected: direct subprocess, zero rmcp coupling)
 
-16-event hook system wired into the agent lifecycle. Claude Code–compatible JSON config.
-Adopted from upstream PR #7411 with full agent.rs integration.
+8-event hook system wired into the agent lifecycle via `HookRuntime`. Claude Code–compatible
+JSON config. Hooks execute as direct subprocesses (not via MCP), decoupled from agent internals.
 
 ```json
 // ~/.config/goose/hooks.json
@@ -107,13 +107,13 @@ CARGO_BUILD_JOBS=2 cargo build -p goose-server
 **Branch strategy:**
 - `main` — our fork's main, tracks upstream + Sovren additions
 - Augmentum-specific work goes directly to `main` or topic branches pushed to `sovren`
-- Upstream hooks merged from `origin/hooks/claude-code-compatible` (our initial impl replaced)
+- Hook system re-architected in Decision 5 (direct subprocess, zero rmcp coupling)
 
 **Upstream sync:**
 ```bash
-git fetch origin
-git merge origin/main  # merge upstream changes onto our main
-git push sovren main
+git fetch upstream
+git merge upstream/main  # merge upstream changes onto our main
+git push origin main
 ```
 
 ---
@@ -121,7 +121,7 @@ git push sovren main
 ## Architecture Notes
 
 - Provider system: `crates/goose/src/providers/` — declarative JSON providers live in `declarative/`
-- Hooks: `crates/goose/src/hooks/` — types, config, executor (routes through ExtensionManager/MCP)
+- Hooks: `crates/goose/src/hooks/` — HookRuntime with direct subprocess execution (zero rmcp imports)
 - Hook wiring: `crates/goose/src/agents/agent.rs` — SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, PostCompact, Stop
 - Agent reply loop: `crates/goose/src/agents/agent.rs::reply()`
 

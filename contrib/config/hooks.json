@@ -33,7 +33,7 @@
         ]
       },
       {
-        "matcher": "developer__shell",
+        "matcher": "shell",
         "hooks": [
           {
             "type": "command",
