@@ -4317,6 +4317,7 @@ dependencies = [
  "minijinja",
  "mockall",
  "nanoid",
+ "oauth2",
  "once_cell",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -4342,6 +4343,7 @@ dependencies = [
  "sha2",
  "shellexpand",
  "sqlx",
+ "strum",
  "symphonia",
  "sys-info",
  "tempfile",
@@ -4461,6 +4463,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "shlex",
+ "strum",
  "tar",
  "tempfile",
  "test-case",
@@ -4972,6 +4975,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -6390,6 +6394,7 @@ dependencies = [
  "getrandom 0.2.17",
  "http 1.4.0",
  "rand 0.8.5",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -8094,6 +8099,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
