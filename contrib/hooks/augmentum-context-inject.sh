@@ -81,11 +81,13 @@ export PWD="${CWD}"
 
 # --- Build tool input payload ---
 # All three tools expect: {"prompt": "...", "session_id": "...", "cwd": "..."}
+# include_always_loaded tells rule-apply.py to include rules/ entries that
+# Claude Code auto-loads but Goose doesn't have in its system prompt
 TOOL_INPUT=$(jq -n \
     --arg prompt "$PROMPT" \
     --arg session_id "$SESSION_ID" \
     --arg cwd "$CWD" \
-    '{"prompt": $prompt, "session_id": $session_id, "cwd": $cwd}')
+    '{"prompt": $prompt, "session_id": $session_id, "cwd": $cwd, "include_always_loaded": true}')
 
 # --- Set up token economy state for tier awareness ---
 # The cognitive tools read tier from a state file keyed by session_id.
