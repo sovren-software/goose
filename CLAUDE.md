@@ -71,7 +71,7 @@ CARGO_BUILD_JOBS=2 cargo build -p goose-server   # produces target/debug/goosed
 cp target/debug/goosed ~/.local/bin/goosed
 
 # Run as systemd service (template in fleet-gateway/)
-ln -sf ~/.dotfiles/.claude/scripts/fleet-gateway/goose-server.service \
+ln -sf ~/.engram/.claude/scripts/fleet-gateway/goose-server.service \
        ~/.config/systemd/user/goose-server.service
 systemctl --user enable --now goose-server
 
@@ -134,4 +134,4 @@ Goose is the AI agent runtime layer for Augmentum OS. Integration points:
 - CQI v1 bridge (UserPromptSubmit) injects memory, vault, and rules from the cognitive layer
 - LiteLLM gateway (`localhost:4000`) provides fleet model routing
 - Permit enforcement (PreToolUse) blocks tool calls outside session scopes
-- Architecture boundary: `~/.dotfiles/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md`
+- Architecture boundary: `~/.engram/.claude/docs/architecture/COGNITIVE-EXECUTION-BOUNDARY-ADR.md`
